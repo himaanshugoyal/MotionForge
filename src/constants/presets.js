@@ -446,3 +446,122 @@ export const ProgressBar = () => {
 };`
   }
 ];
+
+export const CODE_BOILERPLATES = [
+  {
+    id: 'hyperframes-product-reveal',
+    name: 'Cinematic Product Reveal',
+    description: 'Boilerplate HTML structured for HeyGen HyperFrames CLI compiler.',
+    language: 'html',
+    code: `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Product Reveal Intro</title>
+  <!-- Load GSAP for HyperFrames animations -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; color: #fff; }
+    .clip { opacity: 0; position: absolute; transform-origin: center; }
+    .headline { font-family: 'Outfit', sans-serif; font-weight: 800; font-size: 72px; text-shadow: 0 0 20px #a855f7; }
+    .badge { font-family: 'Inter', sans-serif; background: #06b6d4; padding: 10px 24px; border-radius: 50px; }
+  </style>
+</head>
+<body>
+  <!-- Root composition container -->
+  <div id="root" data-composition-id="reveal-intro" data-width="1920" data-height="1080">
+    
+    <!-- Title Card -->
+    <h1 id="title" class="clip headline" data-start="0.5" data-duration="4.0" data-track-index="1" style="left: 50%; top: 40%; transform: translate(-50%, -50%);">
+      REVOLUTIONARY TECH
+    </h1>
+
+    <!-- Feature Badge -->
+    <div id="feat-badge" class="clip badge" data-start="4.8" data-duration="3.5" data-track-index="2" style="left: 50%; top: 70%; transform: translate(-50%, -50%);">
+      AI POWERED 🚀
+    </div>
+  </div>
+
+  <script>
+    // HyperFrames GSAP Trigger Sequence
+    window.addEventListener('load', () => {
+      // Title Animation
+      gsap.fromTo('#title', 
+        { opacity: 0, scale: 0.8 }, 
+        { opacity: 1, scale: 1, duration: 1, ease: 'back.out(1.7)', delay: 0.5 }
+      );
+      gsap.to('#title', { opacity: 0, scale: 1.1, duration: 0.8, delay: 3.7 });
+
+      // Badge Animation
+      gsap.fromTo('#feat-badge', 
+        { opacity: 0, y: 50 }, 
+        { opacity: 1, y: 0, duration: 0.8, ease: 'power2.out', delay: 4.8 }
+      );
+    });
+  </script>
+</body>
+</html>`
+  },
+  {
+    id: 'remotion-social-promo',
+    name: 'Remotion Social Promo',
+    description: 'Boilerplate component structure ready for standard React Remotion setups.',
+    language: 'jsx',
+    code: `import { Sequence, spring, useVideoConfig, useCurrentFrame, AbsoluteFill } from 'remotion';
+
+export const SocialPromoComposition = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+
+  // spring animations
+  const scale = spring({
+    frame: frame - 15, // start at frame 15 (0.5s at 30fps)
+    fps,
+    config: { damping: 12 }
+  });
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: '#05070f', fontFamily: 'sans-serif', color: '#fff' }}>
+      {/* Visual Sequence 1 */}
+      <Sequence from={15} durationInFrames={120}>
+        <div style={{
+          position: 'absolute',
+          left: '50%',
+          top: '40%',
+          transform: \`translate(-50%, -50%) scale(\${scale})\`,
+          fontSize: '64px',
+          fontWeight: 'bold',
+          background: 'linear-gradient(to right, #a855f7, #06b6d4)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          textAlign: 'center',
+          width: '100%'
+        }}>
+          AMAZING MOTION
+        </div>
+      </Sequence>
+
+      {/* Progress timeline overlay */}
+      <Sequence from={0} durationInFrames={180}>
+        <div style={{
+          position: 'absolute',
+          bottom: '50px',
+          left: '10%',
+          width: '80%',
+          height: '6px',
+          backgroundColor: 'rgba(255,255,255,0.2)',
+          borderRadius: '3px',
+          overflow: 'hidden'
+        }}>
+          <div style={{
+            width: \`\${(frame / 180) * 100}%\`,
+            height: '100%',
+            backgroundColor: '#06b6d4'
+          }} />
+        </div>
+      </Sequence>
+    </AbsoluteFill>
+  );
+};`
+  }
+];

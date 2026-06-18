@@ -19,10 +19,17 @@ import {
   Layers,
   ChevronRight,
   Check,
-  VideoOff
+  VideoOff,
+  Globe,
+  FileText,
+  Database,
+  Lock,
+  ChevronDown
 } from 'lucide-react';
-import { PRESET_TEMPLATES } from './constants/presets';
+import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
+import { scrapeWebsite, generateAIComposition } from './utils/aiService';
+import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
 
 const SAMPLE_VIDEOS = [
   {
@@ -44,6 +51,12 @@ const SAMPLE_VIDEOS = [
     thumbnail: 'https://images.unsplash.com/photo-1542831371-29b0f74f9713?auto=format&fit=crop&w=150&h=84&q=80'
   }
 ];
+
+const MODEL_OPTIONS = {
+  gemini: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
+  claude: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229']
+};
 
 export default function App() {
   // Video and Playback State
@@ -90,21 +103,73 @@ export default function App() {
   ]);
 
   const [selectedOverlayId, setSelectedOverlayId] = useState('neon-welcome');
+  
+  // Tabs Navigation
+  const [leftTab, setLeftTab] = useState('assets'); // assets | ai | csv | boilerplates
   const [activeRightTab, setActiveRightTab] = useState('properties'); // properties | code | export
-  const [activeCodeTab, setActiveCodeTab] = useState('hyperframes'); // hyperframes | remotion
-  const [copiedText, setCopiedText] = useState(false);
+  const [activeCodeTab, setActiveCodeTab] = useState('hyperframes'); // hyperframes | remotion | boilerplate
+  
+  // API Configurations State
+  const [apiProvider, setApiProvider] = useState('gemini');
+  const [apiKey, setApiKey] = useState('');
+  const [apiModel, setApiModel] = useState('gemini-1.5-flash');
+  const [showConfig, setShowConfig] = useState(false);
 
-  // Render / Export state
+  // AI Generation Inputs
+  const [aiPrompt, setAiPrompt] = useState('Analyze webpage layout and turn it into a product reveal intro video with bold motion titles.');
+  const [webpageUrl, setWebpageUrl] = useState('');
+  const [rawHtmlPaste, setRawHtmlPaste] = useState('');
+  const [scrapedDataText, setScrapedDataText] = useState('');
+  const [isCrawling, setIsCrawling] = useState(false);
+  const [pdfBase64, setPdfBase64] = useState('');
+  const [pdfFileName, setPdfFileName] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+
+  // CSV Inputs State
+  const [csvContent, setCsvContent] = useState('');
+  const [csvTemplate, setCsvTemplate] = useState('captions'); // captions | data-slides
+  
+  // Boilerplates display code
+  const [selectedBoilerplate, setSelectedBoilerplate] = useState(null);
+
+  // Render / Export State
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [copiedText, setCopiedText] = useState(false);
 
   // Refs
   const videoRef = useRef(null);
   const playerContainerRef = useRef(null);
   const fileInputRef = useRef(null);
+  const pdfInputRef = useRef(null);
+  const csvInputRef = useRef(null);
 
   // Selected Overlay details
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
+
+  // Sync API model dropdown when provider changes
+  useEffect(() => {
+    setApiModel(MODEL_OPTIONS[apiProvider][0]);
+  }, [apiProvider]);
+
+  // Load API config from localStorage
+  useEffect(() => {
+    const savedProvider = localStorage.getItem('mf_provider');
+    const savedKey = localStorage.getItem('mf_key');
+    const savedModel = localStorage.getItem('mf_model');
+    if (savedProvider) setApiProvider(savedProvider);
+    if (savedKey) setApiKey(savedKey);
+    if (savedModel) setApiModel(savedModel);
+  }, []);
+
+  // Save API config helper
+  const handleSaveAPIConfig = () => {
+    localStorage.setItem('mf_provider', apiProvider);
+    localStorage.setItem('mf_key', apiKey);
+    localStorage.setItem('mf_model', apiModel);
+    setShowConfig(false);
+    alert('API key stored securely in your browser!');
+  };
 
   // Sync video timeline playback loop
   useEffect(() => {
@@ -148,7 +213,6 @@ export default function App() {
       video.pause();
       setIsPlaying(false);
     } else {
-      // If playhead is out of crop bounds, reset to crop start
       if (video.currentTime < cropStart || video.currentTime >= cropEnd) {
         video.currentTime = cropStart;
       }
@@ -177,7 +241,6 @@ export default function App() {
 
   // Preset Template Adder
   const handleAddPreset = (preset) => {
-    // Generate unique ID
     const newId = `${preset.id}-${Date.now()}`;
     const newOverlay = {
       id: newId,
@@ -194,7 +257,6 @@ export default function App() {
       animationType: preset.animationType
     };
 
-    // Clamp timing bounds inside video duration
     if (newOverlay.start + newOverlay.duration > videoDuration) {
       newOverlay.duration = Math.max(1, videoDuration - newOverlay.start);
     }
@@ -258,13 +320,126 @@ export default function App() {
     }
   };
 
-  // Exporter activation
+  // Website Crawling Handler
+  const handleCrawlWebsite = async () => {
+    if (!webpageUrl) {
+      alert('Please enter a target website URL first!');
+      return;
+    }
+    setIsCrawling(true);
+    setScrapedDataText('');
+    try {
+      const resultText = await scrapeWebsite(webpageUrl);
+      setScrapedDataText(resultText);
+      alert('Website crawled successfully! Ready to generate composition.');
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setIsCrawling(false);
+    }
+  };
+
+  // PDF file Base64 parser
+  const handlePdfUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setPdfFileName(file.name);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // Strip the mime prefix to get pure base64 bytes
+        const base64String = reader.result.split(',')[1];
+        setPdfBase64(base64String);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Trigger AI Pipeline
+  const handleTriggerAI = async () => {
+    if (!apiKey) {
+      alert('Please configure and save your API Key in settings first!');
+      setShowConfig(true);
+      return;
+    }
+
+    setAiLoading(true);
+    try {
+      // Use crawled URL text, pasted HTML, or PDF base64 if present
+      const combinedPageText = scrapedDataText || rawHtmlPaste;
+      
+      const composition = await generateAIComposition({
+        provider: apiProvider,
+        model: apiModel,
+        apiKey: apiKey,
+        promptText: aiPrompt,
+        fileBase64: pdfBase64,
+        webpageText: combinedPageText
+      });
+
+      // Load parsed visual state into the dashboard
+      setAspectRatio(composition.aspectRatio || 'landscape');
+      setVideoDuration(composition.videoDuration || 10);
+      setOverlays(composition.overlays || []);
+      setCropStart(0);
+      setCropEnd(composition.videoDuration || 10);
+      
+      if (composition.overlays.length > 0) {
+        setSelectedOverlayId(composition.overlays[0].id);
+      }
+      
+      alert('AI Composition generated successfully! Overlay tracks populated.');
+    } catch (err) {
+      console.error(err);
+      alert(`AI Generation failed: ${err.message}`);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // Offline CSV upload handler
+  const handleCsvUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        setCsvContent(event.target.result);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // Map CSV data to tracks offline
+  const handleLoadCSVTimeline = () => {
+    if (!csvContent) {
+      alert('Please paste CSV content or upload a file first.');
+      return;
+    }
+    const rows = parseCSV(csvContent);
+    if (rows.length === 0) {
+      alert('No data rows found in CSV.');
+      return;
+    }
+    const generatedOverlays = mapCSVToTimeline(rows, csvTemplate, videoDuration);
+    setOverlays(generatedOverlays);
+    if (generatedOverlays.length > 0) {
+      setSelectedOverlayId(generatedOverlays[0].id);
+    }
+    alert(`Imported ${generatedOverlays.length} timed tracks from CSV!`);
+  };
+
+  // Boilerplate loader
+  const handleLoadBoilerplate = (bp) => {
+    setSelectedBoilerplate(bp);
+    setActiveRightTab('code');
+    setActiveCodeTab('boilerplate');
+  };
+
+  // Exporter Activation
   const handleExport = async () => {
     if (!videoRef.current) return;
     setIsExporting(true);
     setExportProgress(0);
 
-    // Render configuration resolution based on aspect ratio choice
     let renderWidth = 1920;
     let renderHeight = 1080;
     if (aspectRatio === 'portrait') {
@@ -288,7 +463,6 @@ export default function App() {
         }
       });
 
-      // Download compiled blob
       const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
       a.href = url;
@@ -306,6 +480,10 @@ export default function App() {
 
   // Generated code selector helper
   const getGeneratedCode = () => {
+    if (activeCodeTab === 'boilerplate') {
+      return selectedBoilerplate ? selectedBoilerplate.code : '// Select a boilerplate from templates tab';
+    }
+
     if (!selectedOverlay) return '// Select an overlay preset to generate code';
     
     const template = PRESET_TEMPLATES.find(t => t.animationType === selectedOverlay.animationType);
@@ -334,12 +512,22 @@ export default function App() {
           </div>
           <span className="brand-name">MotionForge AI</span>
           <span style={{ fontSize: '10px', background: 'hsl(var(--accent-purple)/0.2)', color: 'hsl(var(--accent-purple))', padding: '2px 8px', borderRadius: '12px', fontWeight: 'bold' }}>
-            HYPERFRAMES & REMOTION
+            STUDIO PRO
           </span>
         </div>
 
         {/* Global Controls */}
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          {/* Key Settings Toggle */}
+          <button 
+            className="action-btn secondary"
+            onClick={() => setShowConfig(!showConfig)}
+            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <Lock size={14} />
+            API Keys
+          </button>
+
           {/* Aspect Ratio Selector */}
           <div style={{ display: 'flex', background: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border-color))', borderRadius: '8px', padding: '2px' }}>
             <button 
@@ -378,80 +566,380 @@ export default function App() {
         </div>
       </header>
 
-      {/* WORKSPACE CONTENT */}
-      <div className="app-workspace">
-        
-        {/* LEFT SIDEBAR - Videos and Graphic Presets */}
-        <aside className="sidebar-left">
-          {/* Media Section */}
-          <div>
-            <h3 className="sidebar-title">
-              <Video size={14} />
-              1. Video Assets
-            </h3>
-            
-            {/* Custom Upload Card */}
-            <div className="upload-card" onClick={() => fileInputRef.current?.click()}>
-              <Upload size={20} style={{ color: 'hsl(var(--accent-purple))' }} />
-              <div>
-                <p style={{ fontWeight: '600', fontSize: '12px' }}>Upload local video</p>
-                <p style={{ fontSize: '10px', color: 'hsl(var(--text-muted))' }}>MP4, WebM or MOV</p>
-              </div>
+      {/* API KEYS CONFIGURATION OVERLAY MODAL */}
+      {showConfig && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0,0,0,0.85)',
+          zIndex: 1000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backdropFilter: 'blur(8px)'
+        }}>
+          <div className="glass-panel" style={{ width: '420px', padding: '28px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ fontSize: '18px', fontWeight: 'bold', fontFamily: 'var(--font-display)' }}>API Configuration</h3>
+              <button 
+                onClick={() => setShowConfig(false)}
+                style={{ background: 'transparent', border: 'none', color: '#ff4d4d', cursor: 'pointer', fontSize: '12px' }}
+              >
+                Close
+              </button>
+            </div>
+            <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', lineHeight: '1.4' }}>
+              Enter your own API key to power layouts directly. Keys are stored locally in your browser cache.
+            </p>
+
+            <div className="form-group">
+              <label>AI Provider</label>
+              <select value={apiProvider} onChange={(e) => setApiProvider(e.target.value)}>
+                <option value="gemini">Google Gemini</option>
+                <option value="openai">OpenAI (ChatGPT)</option>
+                <option value="claude">Anthropic Claude</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Model selection</label>
+              <select value={apiModel} onChange={(e) => setApiModel(e.target.value)}>
+                {MODEL_OPTIONS[apiProvider].map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Secret API Key</label>
               <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleVideoUpload} 
-                accept="video/*" 
-                style={{ display: 'none' }} 
+                type="password" 
+                placeholder="Paste API Key here" 
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
               />
             </div>
 
-            {/* Preloaded Samples List */}
-            <div style={{ marginTop: '14px' }}>
-              <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', marginBottom: '8px', fontWeight: 'bold' }}>Sample library</p>
-              <div className="media-grid">
-                {SAMPLE_VIDEOS.map((item) => (
-                  <div 
-                    key={item.id} 
-                    className={`media-item ${videoUrl === item.url ? 'active' : ''}`}
-                    onClick={() => {
-                      setVideoUrl(item.url);
-                      setIsPlaying(false);
-                    }}
-                  >
-                    <img src={item.thumbnail} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    <div className="media-item-label">
-                      <span>{item.name}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            {apiProvider === 'claude' && (
+              <p style={{ fontSize: '10px', color: 'hsl(var(--accent-pink))', lineHeight: '1.3' }}>
+                ⚠️ Note: Claude direct browser calls are limited by CORS. Gemini or OpenAI is recommended for instant browser results.
+              </p>
+            )}
+
+            <button className="action-btn" onClick={handleSaveAPIConfig}>
+              Save Config
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* WORKSPACE CONTENT */}
+      <div className="app-workspace">
+        
+        {/* LEFT SIDEBAR - Videos, AI, CSV Data and Boilerplates */}
+        <aside className="sidebar-left" style={{ padding: '0px' }}>
+          {/* Internal Sidebar Tabs */}
+          <div style={{ display: 'flex', borderBottom: '1px solid hsl(var(--border-color))' }}>
+            <button 
+              className={`tab-btn ${leftTab === 'assets' ? 'active' : ''}`}
+              onClick={() => setLeftTab('assets')}
+              style={{ padding: '10px 4px', fontSize: '10px' }}
+            >
+              <Video size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
+              Assets
+            </button>
+            <button 
+              className={`tab-btn ${leftTab === 'ai' ? 'active' : ''}`}
+              onClick={() => setLeftTab('ai')}
+              style={{ padding: '10px 4px', fontSize: '10px' }}
+            >
+              <Sparkles size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
+              AI Maker
+            </button>
+            <button 
+              className={`tab-btn ${leftTab === 'csv' ? 'active' : ''}`}
+              onClick={() => setLeftTab('csv')}
+              style={{ padding: '10px 4px', fontSize: '10px' }}
+            >
+              <Database size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
+              CSV Data
+            </button>
+            <button 
+              className={`tab-btn ${leftTab === 'boilerplates' ? 'active' : ''}`}
+              onClick={() => setLeftTab('boilerplates')}
+              style={{ padding: '10px 4px', fontSize: '10px' }}
+            >
+              <Code size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
+              Templates
+            </button>
           </div>
 
-          {/* Graphic Presets List */}
-          <div>
-            <h3 className="sidebar-title">
-              <Sparkles size={14} />
-              2. Add Graphics
-            </h3>
-            <div className="presets-list">
-              {PRESET_TEMPLATES.map((preset) => (
-                <div 
-                  key={preset.id} 
-                  className="preset-card"
-                  onClick={() => handleAddPreset(preset)}
-                >
-                  <div className="preset-info">
-                    <span className="preset-name">{preset.name}</span>
-                    <span className="preset-desc">{preset.description}</span>
+          <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '20px', overflowY: 'auto', flex: 1 }}>
+            
+            {/* ASSETS TAB */}
+            {leftTab === 'assets' && (
+              <>
+                <div>
+                  <h3 className="sidebar-title">
+                    <Video size={14} />
+                    1. Video Assets
+                  </h3>
+                  
+                  <div className="upload-card" onClick={() => fileInputRef.current?.click()}>
+                    <Upload size={20} style={{ color: 'hsl(var(--accent-purple))' }} />
+                    <div>
+                      <p style={{ fontWeight: '600', fontSize: '12px' }}>Upload local video</p>
+                      <p style={{ fontSize: '10px', color: 'hsl(var(--text-muted))' }}>MP4, WebM or MOV</p>
+                    </div>
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      onChange={handleVideoUpload} 
+                      accept="video/*" 
+                      style={{ display: 'none' }} 
+                    />
                   </div>
-                  <span className="preset-preview-badge">
-                    {preset.category}
-                  </span>
+
+                  <div style={{ marginTop: '14px' }}>
+                    <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', marginBottom: '8px', fontWeight: 'bold' }}>Sample library</p>
+                    <div className="media-grid">
+                      {SAMPLE_VIDEOS.map((item) => (
+                        <div 
+                          key={item.id} 
+                          className={`media-item ${videoUrl === item.url ? 'active' : ''}`}
+                          onClick={() => {
+                            setVideoUrl(item.url);
+                            setIsPlaying(false);
+                          }}
+                        >
+                          <img src={item.thumbnail} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          <div className="media-item-label">
+                            <span>{item.name}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              ))}
-            </div>
+
+                <div>
+                  <h3 className="sidebar-title">
+                    <Plus size={14} />
+                    2. Add Overlay Presets
+                  </h3>
+                  <div className="presets-list">
+                    {PRESET_TEMPLATES.map((preset) => (
+                      <div 
+                        key={preset.id} 
+                        className="preset-card"
+                        onClick={() => handleAddPreset(preset)}
+                      >
+                        <div className="preset-info">
+                          <span className="preset-name">{preset.name}</span>
+                          <span className="preset-desc">{preset.description}</span>
+                        </div>
+                        <span className="preset-preview-badge">
+                          {preset.category}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* AI ASSISTANT TAB */}
+            {leftTab === 'ai' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h3 className="sidebar-title" style={{ margin: 0 }}>
+                    <Sparkles size={14} />
+                    AI Timeline Builder
+                  </h3>
+                  <button 
+                    onClick={() => setShowConfig(true)}
+                    style={{ background: 'transparent', border: 'none', color: 'hsl(var(--accent-purple))', fontSize: '11px', cursor: 'pointer', fontWeight: '600' }}
+                  >
+                    Set Keys
+                  </button>
+                </div>
+
+                {/* Webpage Crawler Section */}
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid hsl(var(--border-color))' }}>
+                  <label style={{ fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
+                    <Globe size={12} style={{ color: 'hsl(var(--accent-cyan))' }} />
+                    Crawl Website Link
+                  </label>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. www.heygen.com" 
+                      value={webpageUrl}
+                      onChange={(e) => setWebpageUrl(e.target.value)}
+                      style={{ flex: 1, padding: '6px 8px', fontSize: '12px' }}
+                    />
+                    <button 
+                      className="action-btn secondary"
+                      onClick={handleCrawlWebsite}
+                      disabled={isCrawling}
+                      style={{ padding: '0 10px', fontSize: '11px' }}
+                    >
+                      {isCrawling ? 'Crawling...' : 'Crawl'}
+                    </button>
+                  </div>
+                  {scrapedDataText && (
+                    <div style={{ fontSize: '10px', color: 'hsl(var(--accent-green))', marginTop: '6px', fontWeight: '600' }}>
+                      ✓ Webpage scraped successfully ({scrapedDataText.length} chars)
+                    </div>
+                  )}
+                  
+                  <details style={{ marginTop: '8px' }}>
+                    <summary style={{ fontSize: '10px', color: 'hsl(var(--text-muted))', cursor: 'pointer' }}>Or Paste Raw Page HTML</summary>
+                    <textarea 
+                      placeholder="Paste webpage text or HTML source code here..."
+                      rows="3"
+                      value={rawHtmlPaste}
+                      onChange={(e) => setRawHtmlPaste(e.target.value)}
+                      style={{ width: '100%', marginTop: '6px', background: 'hsl(var(--bg-main))', color: '#fff', fontSize: '11px', border: '1px solid hsl(var(--border-color))', borderRadius: '4px', padding: '6px' }}
+                    />
+                  </details>
+                </div>
+
+                {/* PDF Document Upload */}
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid hsl(var(--border-color))' }}>
+                  <label style={{ fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
+                    <FileText size={12} style={{ color: 'hsl(var(--accent-purple))' }} />
+                    PDF Document Input
+                  </label>
+                  <div 
+                    className="upload-card"
+                    onClick={() => pdfInputRef.current?.click()}
+                    style={{ padding: '12px', cursor: 'pointer' }}
+                  >
+                    <Upload size={14} style={{ color: 'hsl(var(--accent-purple))' }} />
+                    <span style={{ fontSize: '11px', fontWeight: '500' }}>
+                      {pdfFileName ? pdfFileName : 'Upload PDF Document'}
+                    </span>
+                    <input 
+                      type="file"
+                      ref={pdfInputRef}
+                      onChange={handlePdfUpload}
+                      accept="application/pdf"
+                      style={{ display: 'none' }}
+                    />
+                  </div>
+                </div>
+
+                {/* Prompt Details */}
+                <div className="form-group">
+                  <label>Creative Goal Prompt</label>
+                  <textarea 
+                    rows="3"
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                  />
+                </div>
+
+                {aiLoading ? (
+                  <div style={{ textAlign: 'center', padding: '10px 0' }}>
+                    <div style={{ fontSize: '12px', marginBottom: '6px' }}>Generating composition overlays...</div>
+                    <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+                      <div className="template-progress-fill" style={{ width: '60%', height: '100%' }}></div>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="action-btn" onClick={handleTriggerAI}>
+                    <Sparkles size={14} />
+                    Generate Cinematic Intro
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* CSV DATA IMPORT TAB */}
+            {leftTab === 'csv' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <h3 className="sidebar-title">
+                  <Database size={14} />
+                  Spreadsheet CSV Mappings
+                </h3>
+                <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', lineHeight: '1.4' }}>
+                  Upload a CSV data sheet. It will automatically space rows across the video duration to create structured graphics.
+                </p>
+
+                <div className="upload-card" onClick={() => csvInputRef.current?.click()} style={{ padding: '20px' }}>
+                  <Upload size={20} style={{ color: 'hsl(var(--accent-cyan))' }} />
+                  <p style={{ fontSize: '12px', fontWeight: 'bold' }}>Load .csv File</p>
+                  <input 
+                    type="file"
+                    ref={csvInputRef}
+                    onChange={handleCsvUpload}
+                    accept=".csv"
+                    style={{ display: 'none' }}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Or Paste CSV Text</label>
+                  <textarea 
+                    rows="4" 
+                    placeholder="e.g.&#10;Q1 Sales, $12K&#10;Q2 Sales, $18K&#10;Q3 Sales, $24K" 
+                    value={csvContent}
+                    onChange={(e) => setCsvContent(e.target.value)}
+                    style={{ fontSize: '11px', fontFamily: 'monospace' }}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Template Type</label>
+                  <select value={csvTemplate} onChange={(e) => setCsvTemplate(e.target.value)}>
+                    <option value="captions">Sequential Captions (Subtitles)</option>
+                    <option value="data-slides">Progressive Data Slides (Progress Bars)</option>
+                  </select>
+                </div>
+
+                <button className="action-btn" onClick={handleLoadCSVTimeline}>
+                  <Plus size={14} />
+                  Generate Data Overlays
+                </button>
+              </div>
+            )}
+
+            {/* BOILERPLATES TEMPLATES TAB */}
+            {leftTab === 'boilerplates' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <h3 className="sidebar-title">
+                  <Code size={14} />
+                  Code Boilerplate Templates
+                </h3>
+                <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', lineHeight: '1.4' }}>
+                  Select one of the boilerplates to load complete code structures ready for HyperFrames CLI compilation or Remotion projects.
+                </p>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {CODE_BOILERPLATES.map((bp) => (
+                    <div 
+                      key={bp.id} 
+                      className="preset-card"
+                      onClick={() => handleLoadBoilerplate(bp)}
+                      style={{ borderLeft: `3px solid ${bp.language === 'html' ? 'hsl(var(--accent-purple))' : 'hsl(var(--accent-cyan))'}` }}
+                    >
+                      <div className="preset-info">
+                        <span className="preset-name">{bp.name}</span>
+                        <span className="preset-desc">{bp.description}</span>
+                      </div>
+                      <span className="preset-preview-badge">
+                        {bp.language.toUpperCase()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
           </div>
         </aside>
 
@@ -485,7 +973,6 @@ export default function App() {
                     ...overlay.style
                   };
 
-                  // Inject Accent colors for template preview CSS variables
                   if (overlay.animationType === 'neon') {
                     overlayStyles['--neon-color'] = overlay.accentColor;
                   } else if (overlay.animationType === 'spring') {
@@ -670,7 +1157,6 @@ export default function App() {
 
         {/* RIGHT SIDEBAR - Properties, Export, Code View */}
         <aside className="sidebar-right">
-          {/* Tab Selector */}
           <div className="tabs-container">
             <button 
               className={`tab-btn ${activeRightTab === 'properties' ? 'active' : ''}`}
@@ -695,7 +1181,7 @@ export default function App() {
               <>
                 {selectedOverlay ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    <div style={{ display: 'flex', justifyBetween: 'center', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                       <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'hsl(var(--accent-purple))' }}>
                         {selectedOverlay.name} Settings
                       </span>
@@ -796,7 +1282,7 @@ export default function App() {
                     </div>
 
                     <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', fontStyle: 'italic', marginTop: '10px' }}>
-                      💡 Tip: You can drag overlays directly on the canvas player to position them visually.
+                      💡 Tip: Drag overlay elements directly on the canvas player to visually position them.
                     </p>
                   </div>
                 ) : (
@@ -815,17 +1301,26 @@ export default function App() {
                   <button 
                     className={`control-btn ${activeCodeTab === 'hyperframes' ? 'active-play' : ''}`}
                     onClick={() => setActiveCodeTab('hyperframes')}
-                    style={{ flex: 1, height: '28px', fontSize: '11px', borderRadius: '6px' }}
+                    style={{ flex: 1, height: '28px', fontSize: '10px', borderRadius: '6px' }}
                   >
                     HyperFrames HTML
                   </button>
                   <button 
                     className={`control-btn ${activeCodeTab === 'remotion' ? 'active-play' : ''}`}
                     onClick={() => setActiveCodeTab('remotion')}
-                    style={{ flex: 1, height: '28px', fontSize: '11px', borderRadius: '6px' }}
+                    style={{ flex: 1, height: '28px', fontSize: '10px', borderRadius: '6px' }}
                   >
                     Remotion React
                   </button>
+                  {selectedBoilerplate && (
+                    <button 
+                      className={`control-btn ${activeCodeTab === 'boilerplate' ? 'active-play' : ''}`}
+                      onClick={() => setActiveCodeTab('boilerplate')}
+                      style={{ flex: 1, height: '28px', fontSize: '10px', borderRadius: '6px' }}
+                    >
+                      Template Code
+                    </button>
+                  )}
                 </div>
 
                 <div className="code-panel">
@@ -840,9 +1335,13 @@ export default function App() {
                     <span>
                       🌐 <strong>HeyGen HyperFrames code:</strong> Timed elements with HTML5 data parameters. Integrates directly into CLI compiler output.
                     </span>
-                  ) : (
+                  ) : activeCodeTab === 'remotion' ? (
                     <span>
                       ⚛️ <strong>Remotion React code:</strong> Perfect template syntax ready to paste into your standard Remotion project composition.
+                    </span>
+                  ) : (
+                    <span>
+                      📋 <strong>Active Code Boilerplate:</strong> A comprehensive code structure ready to copy-paste.
                     </span>
                   )}
                 </p>
