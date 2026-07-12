@@ -100,6 +100,7 @@ export async function generateAIComposition({
   apiKey,
   promptText,
   fileBase64, // base64 string for PDF
+  pdfText, // extracted text from PDF
   webpageText,
   proxyUrl = ''
 }) {
@@ -144,7 +145,8 @@ Ensure that:
 
   const userQuery = `Prompt/Goal: ${promptText || 'Create an engaging product showcase video.'}
 ${webpageText ? `\n\nCrawled Website Data:\n${webpageText}` : ''}
-${fileBase64 ? `\n\n[PDF Source Document attached as binary]` : ''}`;
+${pdfText ? `\n\nExtracted PDF Text:\n${pdfText}` : ''}
+${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as binary]` : ''}`;
 
   // 2. Route request to selected provider
   if (provider === 'gemini') {

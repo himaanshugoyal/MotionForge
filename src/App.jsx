@@ -30,25 +30,30 @@ import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
 import { scrapeWebsite, generateAIComposition } from './utils/aiService';
 import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import '@hyperframes/player';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const SAMPLE_VIDEOS = [
   {
-    id: 'sample-ai-presenter',
-    name: 'Talking Head Presenter',
-    url: 'https://assets.mixkit.co/videos/preview/mixkit-man-holding-a-smartphone-in-his-hand-40507-large.mp4',
-    thumbnail: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&h=84&q=80'
+    id: 'sample-dog',
+    name: 'Playful Dog',
+    url: 'https://res.cloudinary.com/demo/video/upload/dog.mp4',
+    thumbnail: 'https://images.unsplash.com/photo-1543466835-00a7907e9de1?auto=format&fit=crop&w=150&h=84&q=80'
   },
   {
-    id: 'sample-cyberpunk',
-    name: 'Cyberpunk Neon Street',
-    url: 'https://assets.mixkit.co/videos/preview/mixkit-cyberpunk-city-street-with-neon-lights-at-night-42250-large.mp4',
-    thumbnail: 'https://images.unsplash.com/photo-1515621061946-eff1c2a352bd?auto=format&fit=crop&w=150&h=84&q=80'
+    id: 'sample-elephants',
+    name: 'Elephants Wild',
+    url: 'https://res.cloudinary.com/demo/video/upload/elephants.mp4',
+    thumbnail: 'https://images.unsplash.com/photo-1557050543-4d5f4e07ef46?auto=format&fit=crop&w=150&h=84&q=80'
   },
   {
-    id: 'sample-code',
-    name: 'Developer IDE Stream',
-    url: 'https://assets.mixkit.co/videos/preview/mixkit-code-running-on-a-computer-screen-43024-large.mp4',
-    thumbnail: 'https://images.unsplash.com/photo-1542831371-29b0f74f9713?auto=format&fit=crop&w=150&h=84&q=80'
+    id: 'sample-turtle',
+    name: 'Sea Turtle Swim',
+    url: 'https://res.cloudinary.com/demo/video/upload/sea_turtle.mp4',
+    thumbnail: 'https://images.unsplash.com/photo-1559583985-c80d8ad9b29f?auto=format&fit=crop&w=150&h=84&q=80'
   }
 ];
 
@@ -122,6 +127,7 @@ export default function App() {
   const [scrapedDataText, setScrapedDataText] = useState('');
   const [isCrawling, setIsCrawling] = useState(false);
   const [pdfBase64, setPdfBase64] = useState('');
+  const [pdfText, setPdfText] = useState('');
   const [pdfFileName, setPdfFileName] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
 
@@ -136,6 +142,10 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [copiedText, setCopiedText] = useState(false);
+
+  // HyperFrames Integration State
+  const [showHyperFramesPreview, setShowHyperFramesPreview] = useState(false);
+  const [hfPreviewUrl, setHfPreviewUrl] = useState(null);
 
   // Refs
   const videoRef = useRef(null);
@@ -227,6 +237,50 @@ export default function App() {
     if (!video) return;
     video.currentTime = cropStart;
     setCurrentTime(cropStart);
+  };
+
+  const generateFullCompositionHTML = () => {
+    const overlaysHTML = overlays.map(overlay => {
+      const template = PRESET_TEMPLATES.find(t => t.animationType === overlay.animationType);
+      return template ? template.hyperframeCode(overlay) : '';
+    }).join('\n');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HyperFrames Preview</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; color: #fff; width: 100vw; height: 100vh; }
+    .clip { opacity: 0; position: absolute; transform-origin: center; }
+    #video-bg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; }
+  </style>
+</head>
+<body>
+  <div id="root" data-composition-id="preview" data-width="1920" data-height="1080" style="position: relative; width: 100%; height: 100%;">
+    <!-- Background Video -->
+    <video id="video-bg" class="clip" data-start="0" data-duration="${videoDuration}" src="${videoUrl}" loop muted playsinline></video>
+    
+    <!-- Graphic Overlays -->
+    ${overlaysHTML}
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    return URL.createObjectURL(blob);
+  };
+
+  const toggleHyperFramesPreview = () => {
+    if (showHyperFramesPreview) {
+      setShowHyperFramesPreview(false);
+      if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+      setHfPreviewUrl(null);
+    } else {
+      setHfPreviewUrl(generateFullCompositionHTML());
+      setShowHyperFramesPreview(true);
+    }
   };
 
   // Video Upload helper
@@ -339,18 +393,43 @@ export default function App() {
     }
   };
 
-  // PDF file Base64 parser
+  // PDF file Base64 parser and text extractor
   const handlePdfUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
       setPdfFileName(file.name);
-      const reader = new FileReader();
-      reader.onloadend = () => {
+      
+      const base64Reader = new FileReader();
+      base64Reader.onloadend = () => {
         // Strip the mime prefix to get pure base64 bytes
-        const base64String = reader.result.split(',')[1];
+        const base64String = base64Reader.result.split(',')[1];
         setPdfBase64(base64String);
       };
-      reader.readAsDataURL(file);
+      base64Reader.readAsDataURL(file);
+
+      const bufferReader = new FileReader();
+      bufferReader.onloadend = async () => {
+        try {
+          const typedarray = new Uint8Array(bufferReader.result);
+          const loadingTask = pdfjsLib.getDocument({ data: typedarray });
+          const pdf = await loadingTask.promise;
+          let fullText = '';
+          const maxPages = Math.min(pdf.numPages, 10);
+          for (let i = 1; i <= maxPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str).join(' ');
+            fullText += pageText + '\n';
+          }
+          const finalPdfText = fullText.trim();
+          setPdfText(finalPdfText);
+          console.log("Successfully extracted text from PDF. Character count:", finalPdfText.length);
+        } catch (err) {
+          console.error("Failed to parse PDF text:", err);
+          alert("Client-side PDF text extraction failed: " + err.message);
+        }
+      };
+      bufferReader.readAsArrayBuffer(file);
     }
   };
 
@@ -360,6 +439,10 @@ export default function App() {
       alert('Please configure and save your API Key in settings first!');
       setShowConfig(true);
       return;
+    }
+
+    if (pdfBase64 && !pdfText) {
+      console.warn("PDF was uploaded but text is empty. Wait for parsing or check for parsing errors.");
     }
 
     setAiLoading(true);
@@ -373,6 +456,7 @@ export default function App() {
         apiKey: apiKey,
         promptText: aiPrompt,
         fileBase64: pdfBase64,
+        pdfText: pdfText,
         webpageText: combinedPageText
       });
 
@@ -947,13 +1031,35 @@ export default function App() {
         <main className="center-work-area">
           {/* Canvas Preview Area */}
           <div className="canvas-viewport">
-            <div className={`player-container ${aspectRatio}`} ref={playerContainerRef}>
+            <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+              <button 
+                className="action-btn" 
+                style={{ background: showHyperFramesPreview ? '#ef4444' : 'hsl(var(--accent-purple))' }}
+                onClick={toggleHyperFramesPreview}
+              >
+                <Sparkles size={14} />
+                {showHyperFramesPreview ? 'Exit HyperFrames Player' : 'Live HyperFrames Preview'}
+              </button>
+            </div>
+
+            {showHyperFramesPreview ? (
+              <div className={`player-container ${aspectRatio}`} style={{ display: 'flex', background: '#000', borderRadius: '12px', overflow: 'hidden' }}>
+                <hyperframes-player 
+                  src={hfPreviewUrl} 
+                  controls 
+                  style={{ width: '100%', height: '100%' }}
+                ></hyperframes-player>
+              </div>
+            ) : (
+              <>
+                <div className={`player-container ${aspectRatio}`} ref={playerContainerRef}>
               <video 
                 ref={videoRef}
                 src={videoUrl}
                 className="main-video"
                 playsInline
                 muted
+                crossOrigin="anonymous"
               />
 
               {/* Overlays Canvas layer */}
@@ -1034,6 +1140,8 @@ export default function App() {
                 {currentTime.toFixed(1)}s / {videoDuration.toFixed(1)}s
               </div>
             </div>
+            </>
+            )}
           </div>
 
           {/* Timeline & Track Layers Editor */}
