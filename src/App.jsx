@@ -58,6 +58,7 @@ import {
   ingestUpload,
   checkApiHealth
 } from './utils/apiClient';
+import TimelinePanel, { TransportDock, formatTimecode } from './components/TimelinePanel';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
@@ -445,10 +446,10 @@ export default function App() {
   // Scrub bar helper
   const handleScrubChange = (e) => {
     const time = parseFloat(e.target.value);
+    setCurrentTime(time);
     const video = videoRef.current;
-    if (video) {
+    if (video && Number.isFinite(video.duration) && time <= video.duration) {
       video.currentTime = time;
-      setCurrentTime(time);
     }
   };
 
@@ -1348,7 +1349,7 @@ export default function App() {
                     </div>
                     <button className="action-btn secondary" onClick={refreshHyperFramesPreview}>
                       <Play size={14} />
-                      Preview Scenes in HyperFrames
+                      Preview in Program Monitor
                     </button>
                   </div>
                 )}
@@ -1439,240 +1440,154 @@ export default function App() {
           </div>
         </aside>
 
-        {/* CENTER PLAYER & TIMELINE BAR */}
+        {/* CENTER — Program monitor + transport + timeline */}
         <main className="center-work-area">
-          {/* Canvas Preview Area */}
-          <div className="canvas-viewport">
-            <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
-              <button 
-                className="action-btn" 
-                style={{ background: showHyperFramesPreview ? '#ef4444' : 'hsl(var(--accent-purple))' }}
-                onClick={toggleHyperFramesPreview}
-              >
-                <Sparkles size={14} />
-                {showHyperFramesPreview ? 'Exit HyperFrames Player' : 'Live HyperFrames Preview'}
-              </button>
-            </div>
-
-            {showHyperFramesPreview ? (
-              <div className={`player-container ${aspectRatio}`} style={{ display: 'flex', background: '#000', borderRadius: '12px', overflow: 'hidden' }}>
-                <hyperframes-player 
-                  src={hfPreviewUrl} 
-                  controls 
-                  style={{ width: '100%', height: '100%' }}
-                ></hyperframes-player>
+          <section className="program-monitor">
+            <div className="monitor-toolbar">
+              <div className="monitor-mode-toggle">
+                <button
+                  type="button"
+                  className={`monitor-mode-btn ${!showHyperFramesPreview ? 'active' : ''}`}
+                  onClick={() => {
+                    if (showHyperFramesPreview) toggleHyperFramesPreview();
+                  }}
+                >
+                  Canvas
+                </button>
+                <button
+                  type="button"
+                  className={`monitor-mode-btn ${showHyperFramesPreview ? 'active' : ''}`}
+                  onClick={() => {
+                    if (!showHyperFramesPreview) refreshHyperFramesPreview();
+                  }}
+                >
+                  HyperFrames
+                </button>
               </div>
-            ) : (
-              <>
-                <div className={`player-container ${aspectRatio}`} ref={playerContainerRef}>
-              <video 
-                ref={videoRef}
-                src={videoUrl}
-                className="main-video"
-                playsInline
-                muted
-                crossOrigin="anonymous"
-              />
-
-              {/* Overlays Canvas layer */}
-              <div className="canvas-overlays-container">
-                {overlays.map((overlay) => {
-                  const active = currentTime >= overlay.start && currentTime <= (overlay.start + overlay.duration);
-                  if (!active) return null;
-
-                  const overlayStyles = {
-                    left: `${overlay.x}%`,
-                    top: `${overlay.y}%`,
-                    transform: 'translate(-50%, -50%)',
-                    fontSize: `${overlay.fontSize}px`,
-                    color: overlay.textColor,
-                    fontFamily: overlay.animationType === 'cyberpunk' ? 'Space Grotesk, monospace' : 'Inter, sans-serif',
-                    zIndex: overlay.trackIndex,
-                    ...overlay.style
-                  };
-
-                  if (overlay.animationType === 'neon') {
-                    overlayStyles['--neon-color'] = overlay.accentColor;
-                  } else if (overlay.animationType === 'spring') {
-                    overlayStyles['backgroundColor'] = overlay.accentColor;
-                    overlayStyles['padding'] = '6px 14px';
-                    overlayStyles['borderRadius'] = '50px';
-                    overlayStyles['whiteSpace'] = 'nowrap';
-                  } else if (overlay.animationType === 'cyberpunk') {
-                    overlayStyles['borderLeft'] = `4px solid ${overlay.accentColor}`;
-                    overlayStyles['backgroundColor'] = 'rgba(0,0,0,0.8)';
-                    overlayStyles['padding'] = '6px 12px';
-                    overlayStyles['borderRadius'] = '0 4px 4px 0';
-                    overlayStyles['textTransform'] = 'uppercase';
-                  } else if (overlay.animationType === 'fade') {
-                    overlayStyles['transform'] = 'translateX(-50%)';
-                    overlayStyles['width'] = '80%';
-                    overlayStyles['textAlign'] = 'center';
-                  }
-
-                  return (
-                    <div
-                      key={overlay.id}
-                      className={`overlay-element template-${overlay.animationType} ${selectedOverlayId === overlay.id ? 'selected' : ''}`}
-                      style={overlayStyles}
-                      onMouseDown={(e) => handleOverlayMouseDown(e, overlay.id)}
-                    >
-                      {overlay.animationType === 'fade' ? (
-                        <span style={{ backgroundColor: 'rgba(0,0,0,0.75)', padding: '4px 10px', borderRadius: '6px' }}>
-                          {overlay.text}
-                        </span>
-                      ) : overlay.animationType === 'progress' ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '220px' }}>
-                          <span style={{ fontSize: '10px' }}>{overlay.text}</span>
-                          <div className="template-progress-bar">
-                            <div className="template-progress-fill" style={{
-                              width: `${Math.min(100, ((currentTime - overlay.start) / overlay.duration) * 100)}%`,
-                              background: overlay.accentColor
-                            }}></div>
-                          </div>
-                        </div>
-                      ) : (
-                        overlay.text
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Dynamic Overlay Floating Player Controls */}
-            <div className="playback-controls">
-              <button className="control-btn" onClick={handleReset} title="Reset to Trim Start">
-                <RotateCcw size={16} />
-              </button>
-              <button className={`control-btn ${isPlaying ? 'active-play' : ''}`} onClick={togglePlay}>
-                {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-              </button>
-              <div className="time-display">
-                {currentTime.toFixed(1)}s / {videoDuration.toFixed(1)}s
-              </div>
-            </div>
-            </>
-            )}
-          </div>
-
-          {/* Timeline & Track Layers Editor */}
-          <div className="timeline-panel">
-            <div className="timeline-header">
-              <div className="timeline-tabs">
-                <span className="timeline-tab active">
-                  <Layers size={12} style={{ marginRight: '6px', verticalAlign: 'middle' }} />
-                  Composition Tracks
+              <div className="monitor-toolbar-meta">
+                <span className="monitor-aspect-badge">
+                  {aspectRatio === 'landscape' ? '16:9' : aspectRatio === 'portrait' ? '9:16' : '1:1'}
+                </span>
+                <span>
+                  {formatTimecode(currentTime)} / {formatTimecode(Math.max(videoDuration, getProjectDuration(project)))}
                 </span>
               </div>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <span style={{ fontSize: '11px', color: 'hsl(var(--text-muted))' }}>Trim limits:</span>
-                <input 
-                  type="number" 
-                  value={cropStart.toFixed(1)} 
-                  step="0.5" 
-                  min="0" 
-                  max={cropEnd}
-                  onChange={(e) => setCropStart(Math.max(0, parseFloat(e.target.value)))}
-                  style={{ width: '50px', padding: '2px 4px', fontSize: '10px' }} 
-                />
-                <span style={{ fontSize: '10px' }}>to</span>
-                <input 
-                  type="number" 
-                  value={cropEnd.toFixed(1)} 
-                  step="0.5" 
-                  min={cropStart} 
-                  max={videoDuration}
-                  onChange={(e) => setCropEnd(Math.min(videoDuration, parseFloat(e.target.value)))}
-                  style={{ width: '50px', padding: '2px 4px', fontSize: '10px' }} 
-                />
-              </div>
             </div>
 
-            <div className="timeline-body">
-              {/* Scrub/Crop Timeline Track */}
-              <div className="timeline-track-container">
-                <div className="timeline-bar-wrapper">
-                  {/* Current Playhead */}
-                  <div 
-                    className="playhead" 
-                    style={{ left: `${(currentTime / videoDuration) * 100}%` }}
-                  >
-                    <div className="playhead-handle"></div>
-                  </div>
+            <div className="program-stage">
+              <div className={`program-frame ${aspectRatio}`} ref={!showHyperFramesPreview ? playerContainerRef : undefined}>
+                {showHyperFramesPreview ? (
+                  <hyperframes-player
+                    src={hfPreviewUrl}
+                    controls
+                    style={{ width: '100%', height: '100%' }}
+                  ></hyperframes-player>
+                ) : (
+                  <>
+                    <video
+                      ref={videoRef}
+                      src={videoUrl}
+                      className="main-video"
+                      playsInline
+                      muted
+                      crossOrigin="anonymous"
+                    />
+                    <div className="canvas-overlays-container">
+                      {overlays.map((overlay) => {
+                        const active = currentTime >= overlay.start && currentTime <= (overlay.start + overlay.duration);
+                        if (!active) return null;
 
-                  {/* Crop Trim Region Overlay */}
-                  <div 
-                    className="timeline-crop-overlay"
-                    style={{
-                      left: `${(cropStart / videoDuration) * 100}%`,
-                      width: `${((cropEnd - cropStart) / videoDuration) * 100}%`
-                    }}
-                  >
-                    <div 
-                      className="crop-handle" 
-                      title="Trim start limit"
-                      style={{ transform: 'translateX(-50%)' }}
-                    ></div>
-                    <div 
-                      className="crop-handle" 
-                      title="Trim end limit"
-                      style={{ transform: 'translateX(50%)' }}
-                    ></div>
-                  </div>
+                        const overlayStyles = {
+                          left: `${overlay.x}%`,
+                          top: `${overlay.y}%`,
+                          transform: 'translate(-50%, -50%)',
+                          fontSize: `${overlay.fontSize}px`,
+                          color: overlay.textColor,
+                          fontFamily: overlay.animationType === 'cyberpunk' ? 'Space Grotesk, monospace' : 'Inter, sans-serif',
+                          zIndex: overlay.trackIndex,
+                          ...overlay.style
+                        };
 
-                  {/* Range Slider for scrubbing */}
-                  <input 
-                    type="range"
-                    min="0"
-                    max={videoDuration}
-                    step="0.05"
-                    value={currentTime}
-                    onChange={handleScrubChange}
-                    style={{
-                      position: 'absolute',
-                      width: '100%',
-                      height: '100%',
-                      opacity: 0,
-                      cursor: 'pointer',
-                      zIndex: 80
-                    }}
-                  />
-                </div>
-              </div>
+                        if (overlay.animationType === 'neon') {
+                          overlayStyles['--neon-color'] = overlay.accentColor;
+                        } else if (overlay.animationType === 'spring') {
+                          overlayStyles['backgroundColor'] = overlay.accentColor;
+                          overlayStyles['padding'] = '6px 14px';
+                          overlayStyles['borderRadius'] = '50px';
+                          overlayStyles['whiteSpace'] = 'nowrap';
+                        } else if (overlay.animationType === 'cyberpunk') {
+                          overlayStyles['borderLeft'] = `4px solid ${overlay.accentColor}`;
+                          overlayStyles['backgroundColor'] = 'rgba(0,0,0,0.8)';
+                          overlayStyles['padding'] = '6px 12px';
+                          overlayStyles['borderRadius'] = '0 4px 4px 0';
+                          overlayStyles['textTransform'] = 'uppercase';
+                        } else if (overlay.animationType === 'fade') {
+                          overlayStyles['transform'] = 'translateX(-50%)';
+                          overlayStyles['width'] = '80%';
+                          overlayStyles['textAlign'] = 'center';
+                        }
 
-              {/* Individual Graphic Layers Tracks */}
-              <div className="timeline-layers">
-                {overlays.map((layer) => {
-                  const left = (layer.start / videoDuration) * 100;
-                  const width = (layer.duration / videoDuration) * 100;
-
-                  return (
-                    <div key={layer.id} className="layer-row">
-                      <span className="layer-name">{layer.text || layer.name}</span>
-                      <div className="layer-track">
-                        <div 
-                          className={`layer-block ${selectedOverlayId === layer.id ? 'selected' : ''}`}
-                          style={{
-                            left: `${left}%`,
-                            width: `${width}%`
-                          }}
-                          onClick={() => setSelectedOverlayId(layer.id)}
-                        >
-                          {layer.name}
-                        </div>
-                      </div>
+                        return (
+                          <div
+                            key={overlay.id}
+                            className={`overlay-element template-${overlay.animationType} ${selectedOverlayId === overlay.id ? 'selected' : ''}`}
+                            style={overlayStyles}
+                            onMouseDown={(e) => handleOverlayMouseDown(e, overlay.id)}
+                          >
+                            {overlay.animationType === 'fade' ? (
+                              <span style={{ backgroundColor: 'rgba(0,0,0,0.75)', padding: '4px 10px', borderRadius: '6px' }}>
+                                {overlay.text}
+                              </span>
+                            ) : overlay.animationType === 'progress' ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '220px' }}>
+                                <span style={{ fontSize: '10px' }}>{overlay.text}</span>
+                                <div className="template-progress-bar">
+                                  <div className="template-progress-fill" style={{
+                                    width: `${Math.min(100, ((currentTime - overlay.start) / overlay.duration) * 100)}%`,
+                                    background: overlay.accentColor
+                                  }}></div>
+                                </div>
+                              </div>
+                            ) : (
+                              overlay.text
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-                {overlays.length === 0 && (
-                  <div style={{ textAlign: 'center', color: 'hsl(var(--text-muted))', padding: '10px 0', fontSize: '12px' }}>
-                    No graphic overlays added yet. Choose a preset template above to enhance video.
-                  </div>
+                  </>
                 )}
               </div>
             </div>
-          </div>
+          </section>
+
+          <TransportDock
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            duration={Math.max(videoDuration, getProjectDuration(project))}
+            showHyperFramesPreview={showHyperFramesPreview}
+            onPlay={togglePlay}
+            onReset={handleReset}
+          />
+
+          <TimelinePanel
+            videoDuration={Math.max(videoDuration, getProjectDuration(project))}
+            currentTime={currentTime}
+            cropStart={cropStart}
+            cropEnd={cropEnd}
+            overlays={overlays}
+            project={project}
+            selectedOverlayId={selectedOverlayId}
+            selectedSceneId={selectedSceneId}
+            onScrub={handleScrubChange}
+            onSelectOverlay={setSelectedOverlayId}
+            onSelectScene={(id) => {
+              setSelectedSceneId(id);
+              setLeftTab('scenes');
+            }}
+            onCropStart={setCropStart}
+            onCropEnd={setCropEnd}
+          />
         </main>
 
         {/* RIGHT SIDEBAR - Properties, Export, Code View */}
