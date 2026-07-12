@@ -41,6 +41,7 @@ export async function createProjectWorkspace({ html, assets = [], project = null
   }
 
   const localizedHtml = String(html || '')
+    .replace(/https?:\/\/[^"'/]+\/gsap\.min\.js/g, './vendor/gsap.min.js')
     .replace(/https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/gsap\/[^"']+\/gsap\.min\.js/g, './vendor/gsap.min.js')
     .replace(/https:\/\/cdn\.jsdelivr\.net\/npm\/gsap[^"']*\/gsap\.min\.js/g, './vendor/gsap.min.js')
     .replace(/src=["']\/gsap\.min\.js["']/g, 'src="./vendor/gsap.min.js"');

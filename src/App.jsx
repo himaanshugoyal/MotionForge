@@ -47,7 +47,8 @@ import { createScene } from './models/scene';
 import {
   buildCompositionHtml,
   buildCompositionHtmlFromOverlays,
-  compositionToBlobUrl
+  compositionToBlobUrl,
+  prepareHtmlForBrowserPreview
 } from './composition/buildCompositionHtml';
 import {
   startHyperFramesRender,
@@ -312,29 +313,34 @@ export default function App() {
     setCurrentTime(cropStart);
   };
 
-  const getCompositionHtmlString = () => {
+  const getCompositionHtmlString = (forPreview = false) => {
+    const baseUrl = forPreview && typeof window !== 'undefined' ? window.location.origin : '';
     const hasScenes = Array.isArray(project.scenes) && project.scenes.length > 0
       && project.scenes.some((s) => s.template !== 'legacy-overlays');
 
+    let html;
     if (hasScenes) {
-      return buildCompositionHtml({
+      html = buildCompositionHtml({
         ...project,
         aspectRatio,
-        backgroundVideoUrl: null // scene backgrounds carry visuals for HF render
+        backgroundVideoUrl: null
+      }, { baseUrl });
+    } else {
+      html = buildCompositionHtmlFromOverlays({
+        overlays,
+        videoUrl,
+        videoDuration,
+        aspectRatio,
+        name: project.name,
+        baseUrl
       });
     }
 
-    return buildCompositionHtmlFromOverlays({
-      overlays,
-      videoUrl,
-      videoDuration,
-      aspectRatio,
-      name: project.name
-    });
+    return forPreview ? prepareHtmlForBrowserPreview(html, baseUrl) : html;
   };
 
   const generateFullCompositionHTML = () => {
-    return compositionToBlobUrl(getCompositionHtmlString());
+    return compositionToBlobUrl(getCompositionHtmlString(true));
   };
 
   const toggleHyperFramesPreview = () => {
@@ -346,6 +352,13 @@ export default function App() {
       setHfPreviewUrl(generateFullCompositionHTML());
       setShowHyperFramesPreview(true);
     }
+  };
+
+  const refreshHyperFramesPreview = () => {
+    if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+    const url = generateFullCompositionHTML();
+    setHfPreviewUrl(url);
+    setShowHyperFramesPreview(true);
   };
 
   // Video Upload helper
@@ -749,7 +762,7 @@ export default function App() {
     setHfRenderProgress(0);
     setHfRenderStatus('Submitting composition…');
     try {
-      const html = getCompositionHtmlString();
+      const html = getCompositionHtmlString(true);
       const job = await startHyperFramesRender({
         html,
         project: {
@@ -1333,11 +1346,7 @@ export default function App() {
                         onChange={(e) => handleUpdateSelectedScene('accentColor', e.target.value)}
                       />
                     </div>
-                    <button className="action-btn secondary" onClick={() => {
-                      if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
-                      setHfPreviewUrl(generateFullCompositionHTML());
-                      setShowHyperFramesPreview(true);
-                    }}>
+                    <button className="action-btn secondary" onClick={refreshHyperFramesPreview}>
                       <Play size={14} />
                       Preview Scenes in HyperFrames
                     </button>

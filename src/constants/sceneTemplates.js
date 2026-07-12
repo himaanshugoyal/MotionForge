@@ -247,9 +247,20 @@ export function sceneScripts() {
       const root = document.getElementById('root');
       const compositionId = root?.getAttribute('data-composition-id') || 'motionforge';
 
-      if (typeof gsap === 'undefined') {
+      function revealStatic() {
         if (root) root.setAttribute('data-no-timeline', 'true');
-        document.querySelectorAll('.scene').forEach((s) => { s.style.opacity = '1'; });
+        document.querySelectorAll('.scene').forEach((s) => {
+          s.classList.add('is-static-preview');
+          s.style.opacity = '1';
+        });
+        document.querySelectorAll('[data-anim]').forEach((el) => {
+          el.style.opacity = '1';
+          el.style.transform = 'none';
+        });
+      }
+
+      if (typeof gsap === 'undefined') {
+        revealStatic();
         return;
       }
 
@@ -261,9 +272,10 @@ export function sceneScripts() {
         const dur = parseFloat(scene.getAttribute('data-duration') || '4');
         const local = gsap.timeline();
 
+        // Keep scene visible for its window; animate children for polish
         local.set(scene, { opacity: 1 }, 0);
-        local.fromTo(scene, { opacity: 0 }, { opacity: 1, duration: 0.35, ease: 'power1.out' }, 0);
-        local.to(scene, { opacity: 0, duration: 0.35, ease: 'power1.in' }, Math.max(0.4, dur - 0.35));
+        local.fromTo(scene, { opacity: 0 }, { opacity: 1, duration: 0.25, ease: 'power1.out' }, 0);
+        local.to(scene, { opacity: 0, duration: 0.25, ease: 'power1.in' }, Math.max(0.5, dur - 0.25));
 
         const title = scene.querySelector('[data-anim="title"]');
         const sub = scene.querySelector('[data-anim="sub"]');
@@ -297,6 +309,9 @@ export function sceneScripts() {
       window.__timelines[compositionId] = master;
       window.__hfTimeline = master;
       window.__hfSeek = (t) => master.seek(t);
+
+      // Ensure first frame isn't stuck at opacity 0 before the player seeks
+      try { master.seek(0.35); } catch (e) {}
     })();
   `;
 }
