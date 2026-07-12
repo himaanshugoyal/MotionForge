@@ -24,12 +24,39 @@ import {
   FileText,
   Database,
   Lock,
-  ChevronDown
+  ChevronDown,
+  Image as ImageIcon,
+  ArrowUp,
+  ArrowDown,
+  Clapperboard
 } from 'lucide-react';
 import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
-import { scrapeWebsite, generateAIComposition } from './utils/aiService';
+import { scrapeWebsite, generateAIComposition, briefFromPdfText } from './utils/aiService';
 import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
+import {
+  createProject,
+  getProjectDuration,
+  projectFromOverlays,
+  updateScene,
+  reorderScenes,
+  duplicateScene,
+  removeScene
+} from './models/project';
+import { createScene } from './models/scene';
+import {
+  buildCompositionHtml,
+  buildCompositionHtmlFromOverlays,
+  compositionToBlobUrl
+} from './composition/buildCompositionHtml';
+import {
+  startHyperFramesRender,
+  pollRenderUntilDone,
+  downloadRender,
+  ingestUrl,
+  ingestUpload,
+  checkApiHealth
+} from './utils/apiClient';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
@@ -110,7 +137,7 @@ export default function App() {
   const [selectedOverlayId, setSelectedOverlayId] = useState('neon-welcome');
   
   // Tabs Navigation
-  const [leftTab, setLeftTab] = useState('assets'); // assets | ai | csv | boilerplates
+  const [leftTab, setLeftTab] = useState('assets'); // assets | ai | scenes | csv | boilerplates
   const [activeRightTab, setActiveRightTab] = useState('properties'); // properties | code | export
   const [activeCodeTab, setActiveCodeTab] = useState('hyperframes'); // hyperframes | remotion | boilerplate
   
@@ -130,6 +157,23 @@ export default function App() {
   const [pdfText, setPdfText] = useState('');
   const [pdfFileName, setPdfFileName] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const [contentBrief, setContentBrief] = useState(null);
+  const [screenshotAsset, setScreenshotAsset] = useState(null);
+  const [imageBase64, setImageBase64] = useState('');
+  const [imageMimeType, setImageMimeType] = useState('image/png');
+  const [serverOnline, setServerOnline] = useState(false);
+
+  // Multi-scene HyperFrames project
+  const [project, setProject] = useState(() => createProject({
+    name: 'MotionForge Project',
+    aspectRatio: 'landscape',
+    scenes: [
+      createScene({ title: 'CREATIVE REEL', subtitle: 'MotionForge HyperFrames', template: 'title-card', duration: 3.5 }),
+      createScene({ title: 'What you get', template: 'bullet-explainer', bullets: ['Document & URL ingest', 'Editable scenes', 'Frame-accurate MP4'], duration: 5 }),
+      createScene({ title: 'Ship the story', subtitle: 'Export MP4', template: 'cta-outro', duration: 3 })
+    ]
+  }));
+  const [selectedSceneId, setSelectedSceneId] = useState(null);
 
   // CSV Inputs State
   const [csvContent, setCsvContent] = useState('');
@@ -142,6 +186,9 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [copiedText, setCopiedText] = useState(false);
+  const [isHfRendering, setIsHfRendering] = useState(false);
+  const [hfRenderProgress, setHfRenderProgress] = useState(0);
+  const [hfRenderStatus, setHfRenderStatus] = useState('');
 
   // HyperFrames Integration State
   const [showHyperFramesPreview, setShowHyperFramesPreview] = useState(false);
@@ -153,9 +200,11 @@ export default function App() {
   const fileInputRef = useRef(null);
   const pdfInputRef = useRef(null);
   const csvInputRef = useRef(null);
+  const screenshotInputRef = useRef(null);
 
   // Selected Overlay details
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
+  const selectedScene = (project.scenes || []).find((s) => s.id === selectedSceneId) || project.scenes?.[0];
 
   // Sync API model dropdown when provider changes
   useEffect(() => {
@@ -171,6 +220,30 @@ export default function App() {
     if (savedKey) setApiKey(savedKey);
     if (savedModel) setApiModel(savedModel);
   }, []);
+
+  // Probe render API health
+  useEffect(() => {
+    checkApiHealth()
+      .then(() => setServerOnline(true))
+      .catch(() => setServerOnline(false));
+  }, []);
+
+  // Keep selected scene in sync
+  useEffect(() => {
+    if (!selectedSceneId && project.scenes?.[0]) {
+      setSelectedSceneId(project.scenes[0].id);
+    }
+  }, [project.scenes, selectedSceneId]);
+
+  // Keep project aspect / background video aligned with editor
+  useEffect(() => {
+    setProject((prev) => ({
+      ...prev,
+      aspectRatio,
+      backgroundVideoUrl: videoUrl,
+      updatedAt: new Date().toISOString()
+    }));
+  }, [aspectRatio, videoUrl]);
 
   // Save API config helper
   const handleSaveAPIConfig = () => {
@@ -239,37 +312,29 @@ export default function App() {
     setCurrentTime(cropStart);
   };
 
+  const getCompositionHtmlString = () => {
+    const hasScenes = Array.isArray(project.scenes) && project.scenes.length > 0
+      && project.scenes.some((s) => s.template !== 'legacy-overlays');
+
+    if (hasScenes) {
+      return buildCompositionHtml({
+        ...project,
+        aspectRatio,
+        backgroundVideoUrl: null // scene backgrounds carry visuals for HF render
+      });
+    }
+
+    return buildCompositionHtmlFromOverlays({
+      overlays,
+      videoUrl,
+      videoDuration,
+      aspectRatio,
+      name: project.name
+    });
+  };
+
   const generateFullCompositionHTML = () => {
-    const overlaysHTML = overlays.map(overlay => {
-      const template = PRESET_TEMPLATES.find(t => t.animationType === overlay.animationType);
-      return template ? template.hyperframeCode(overlay) : '';
-    }).join('\n');
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>HyperFrames Preview</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
-  <style>
-    body { margin: 0; background: #000; overflow: hidden; color: #fff; width: 100vw; height: 100vh; }
-    .clip { opacity: 0; position: absolute; transform-origin: center; }
-    #video-bg { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; }
-  </style>
-</head>
-<body>
-  <div id="root" data-composition-id="preview" data-width="1920" data-height="1080" style="position: relative; width: 100%; height: 100%;">
-    <!-- Background Video -->
-    <video id="video-bg" class="clip" data-start="0" data-duration="${videoDuration}" src="${videoUrl}" loop muted playsinline></video>
-    
-    <!-- Graphic Overlays -->
-    ${overlaysHTML}
-  </div>
-</body>
-</html>`;
-
-    const blob = new Blob([html], { type: 'text/html' });
-    return URL.createObjectURL(blob);
+    return compositionToBlobUrl(getCompositionHtmlString());
   };
 
   const toggleHyperFramesPreview = () => {
@@ -374,7 +439,7 @@ export default function App() {
     }
   };
 
-  // Website Crawling Handler
+  // Website Crawling Handler — prefers server HyperFrames capture
   const handleCrawlWebsite = async () => {
     if (!webpageUrl) {
       alert('Please enter a target website URL first!');
@@ -383,13 +448,72 @@ export default function App() {
     setIsCrawling(true);
     setScrapedDataText('');
     try {
-      const resultText = await scrapeWebsite(webpageUrl);
-      setScrapedDataText(resultText);
-      alert('Website crawled successfully! Ready to generate composition.');
+      try {
+        const result = await ingestUrl(webpageUrl);
+        setContentBrief(result.brief);
+        setScrapedDataText(
+          `URL CAPTURE (${result.captureMethod})\nTitle: ${result.brief.title}\nURL: ${result.brief.url}\n\n` +
+          `Bullets:\n${(result.brief.bullets || []).map((b) => `- ${b}`).join('\n')}\n\n` +
+          `Sections:\n${(result.brief.sections || []).map((s) => `- ${s.heading}`).join('\n')}\n\n` +
+          `Assets: ${(result.brief.assets || []).length} screenshots`
+        );
+        if (result.brief.assets?.[0]?.path) {
+          setScreenshotAsset(result.brief.assets[0]);
+        }
+        setServerOnline(true);
+        alert('Website captured via render server. Screenshots + brand tokens ready.');
+      } catch (serverErr) {
+        console.warn('Server capture failed, falling back to CORS scrape:', serverErr);
+        const resultText = await scrapeWebsite(webpageUrl);
+        setScrapedDataText(resultText);
+        setContentBrief(null);
+        alert('Website crawled via browser proxy (server capture unavailable).');
+      }
     } catch (err) {
       alert(err.message);
     } finally {
       setIsCrawling(false);
+    }
+  };
+
+  // Screenshot / image upload
+  const handleScreenshotUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result;
+        const base64 = String(dataUrl).split(',')[1] || '';
+        setImageBase64(base64);
+        setImageMimeType(file.type || 'image/png');
+      };
+      reader.readAsDataURL(file);
+
+      try {
+        const { asset, brief } = await ingestUpload(file, { typeHint: 'screenshot', title: file.name });
+        setScreenshotAsset(asset);
+        setContentBrief(brief);
+        setServerOnline(true);
+        alert('Screenshot uploaded. It will drive ken-burns scenes on generate.');
+      } catch {
+        setScreenshotAsset({
+          type: 'screenshot',
+          filename: file.name,
+          publicUrl: URL.createObjectURL(file)
+        });
+        setContentBrief({
+          title: file.name.replace(/\.[^.]+$/, ''),
+          bullets: ['Visual source provided as screenshot'],
+          sections: [{ heading: 'Visual Story', points: ['Open on the visual', 'Highlight details', 'Close with CTA'] }],
+          assets: [{ type: 'screenshot', path: file.name }],
+          brand: { colors: ['#0a0a0f', '#67e8f9', '#ffffff'], fonts: ['Outfit'] },
+          sourceType: 'screenshot'
+        });
+        alert('Screenshot loaded locally (upload API offline).');
+      }
+    } catch (err) {
+      alert(err.message);
     }
   };
 
@@ -401,7 +525,6 @@ export default function App() {
       
       const base64Reader = new FileReader();
       base64Reader.onloadend = () => {
-        // Strip the mime prefix to get pure base64 bytes
         const base64String = base64Reader.result.split(',')[1];
         setPdfBase64(base64String);
       };
@@ -423,6 +546,7 @@ export default function App() {
           }
           const finalPdfText = fullText.trim();
           setPdfText(finalPdfText);
+          setContentBrief(briefFromPdfText(finalPdfText, file.name));
           console.log("Successfully extracted text from PDF. Character count:", finalPdfText.length);
         } catch (err) {
           console.error("Failed to parse PDF text:", err);
@@ -447,9 +571,9 @@ export default function App() {
 
     setAiLoading(true);
     try {
-      // Use crawled URL text, pasted HTML, or PDF base64 if present
       const combinedPageText = scrapedDataText || rawHtmlPaste;
-      
+      const brief = contentBrief || (pdfText ? briefFromPdfText(pdfText, pdfFileName) : null);
+
       const composition = await generateAIComposition({
         provider: apiProvider,
         model: apiModel,
@@ -457,27 +581,84 @@ export default function App() {
         promptText: aiPrompt,
         fileBase64: pdfBase64,
         pdfText: pdfText,
-        webpageText: combinedPageText
+        webpageText: combinedPageText,
+        contentBrief: brief,
+        imageBase64: imageBase64 || null,
+        imageMimeType
       });
 
-      // Load parsed visual state into the dashboard
       setAspectRatio(composition.aspectRatio || 'landscape');
       setVideoDuration(composition.videoDuration || 10);
       setOverlays(composition.overlays || []);
       setCropStart(0);
       setCropEnd(composition.videoDuration || 10);
-      
+
+      // Prefer screenshot URL from brief for ken-burns scenes
+      const shotUrl = screenshotAsset?.publicUrl || screenshotAsset?.path || brief?.assets?.[0]?.path;
+      const scenes = (composition.scenes || []).map((s) => createScene({
+        ...s,
+        imageUrl: s.template === 'screenshot-kenburns'
+          ? (s.imageUrl || shotUrl || null)
+          : s.imageUrl,
+        background: s.template === 'screenshot-kenburns' && (s.imageUrl || shotUrl)
+          ? { type: 'image', value: s.imageUrl || shotUrl }
+          : s.background
+      }));
+
+      const nextProject = createProject({
+        name: composition.name || 'AI Composition',
+        aspectRatio: composition.aspectRatio || 'landscape',
+        brand: composition.brand,
+        scenes: scenes.length
+          ? scenes
+          : projectFromOverlays({
+              overlays: composition.overlays,
+              aspectRatio: composition.aspectRatio,
+              videoDuration: composition.videoDuration,
+              videoUrl
+            }).scenes,
+        assets: brief?.assets || [],
+        sourceMeta: { brief, prompt: aiPrompt },
+        backgroundVideoUrl: videoUrl
+      });
+
+      setProject(nextProject);
+      setSelectedSceneId(nextProject.scenes[0]?.id || null);
+
       if (composition.overlays.length > 0) {
         setSelectedOverlayId(composition.overlays[0].id);
       }
-      
-      alert('AI Composition generated successfully! Overlay tracks populated.');
+
+      setLeftTab('scenes');
+      alert('AI multi-scene composition ready. Edit scenes, preview HyperFrames, then render MP4.');
     } catch (err) {
       console.error(err);
       alert(`AI Generation failed: ${err.message}`);
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const handleUpdateSelectedScene = (key, value) => {
+    if (!selectedScene) return;
+    setProject((prev) => updateScene(prev, selectedScene.id, { [key]: value }));
+  };
+
+  const handleAddScene = (template = 'title-card') => {
+    const scene = createScene({ title: 'New Scene', template });
+    setProject((prev) => ({
+      ...prev,
+      scenes: [...prev.scenes, scene],
+      updatedAt: new Date().toISOString()
+    }));
+    setSelectedSceneId(scene.id);
+  };
+
+  const handleMoveScene = (sceneId, direction) => {
+    const idx = project.scenes.findIndex((s) => s.id === sceneId);
+    if (idx < 0) return;
+    const to = direction === 'up' ? idx - 1 : idx + 1;
+    setProject((prev) => reorderScenes(prev, idx, to));
   };
 
   // Offline CSV upload handler
@@ -518,7 +699,7 @@ export default function App() {
     setActiveCodeTab('boilerplate');
   };
 
-  // Exporter Activation
+  // Browser draft export (MediaRecorder)
   const handleExport = async () => {
     if (!videoRef.current) return;
     setIsExporting(true);
@@ -562,22 +743,62 @@ export default function App() {
     }
   };
 
+  // HyperFrames producer MP4 render (primary)
+  const handleHyperFramesRender = async () => {
+    setIsHfRendering(true);
+    setHfRenderProgress(0);
+    setHfRenderStatus('Submitting composition…');
+    try {
+      const html = getCompositionHtmlString();
+      const job = await startHyperFramesRender({
+        html,
+        project: {
+          ...project,
+          aspectRatio,
+          duration: getProjectDuration(project) || videoDuration
+        },
+        quality: 'high',
+        fps: 30
+      });
+      setServerOnline(true);
+      setHfRenderStatus(`Rendering ${job.id.slice(0, 8)}…`);
+      const done = await pollRenderUntilDone(job.id, {
+        onProgress: (j) => {
+          setHfRenderProgress(j.progress || 0);
+          setHfRenderStatus(j.status === 'rendering' ? `Rendering… ${j.progress || 0}%` : j.status);
+        }
+      });
+      downloadRender(done.id, `motionforge-${done.id.slice(0, 8)}.mp4`);
+      setHfRenderStatus('Download started');
+      alert('HyperFrames MP4 render complete.');
+    } catch (err) {
+      console.error(err);
+      setServerOnline(false);
+      alert(`HyperFrames render failed: ${err.message}\n\nMake sure the API is running (npm run dev) and Chrome/FFmpeg are available.`);
+    } finally {
+      setIsHfRendering(false);
+    }
+  };
+
   // Generated code selector helper
   const getGeneratedCode = () => {
     if (activeCodeTab === 'boilerplate') {
       return selectedBoilerplate ? selectedBoilerplate.code : '// Select a boilerplate from templates tab';
     }
 
-    if (!selectedOverlay) return '// Select an overlay preset to generate code';
+    if (activeCodeTab === 'hyperframes') {
+      if (!selectedOverlay) {
+        return getCompositionHtmlString();
+      }
+      const template = PRESET_TEMPLATES.find(t => t.animationType === selectedOverlay.animationType);
+      return template ? template.hyperframeCode(selectedOverlay) : getCompositionHtmlString();
+    }
+
+    if (!selectedOverlay) return '// Select an overlay preset to generate Remotion code';
     
     const template = PRESET_TEMPLATES.find(t => t.animationType === selectedOverlay.animationType);
     if (!template) return '// Template not found';
-
-    if (activeCodeTab === 'hyperframes') {
-      return template.hyperframeCode(selectedOverlay);
-    } else {
-      return template.remotionCode(selectedOverlay);
-    }
+    return template.remotionCode(selectedOverlay);
   };
 
   const handleCopyCode = () => {
@@ -744,12 +965,20 @@ export default function App() {
               AI Maker
             </button>
             <button 
+              className={`tab-btn ${leftTab === 'scenes' ? 'active' : ''}`}
+              onClick={() => setLeftTab('scenes')}
+              style={{ padding: '10px 4px', fontSize: '10px' }}
+            >
+              <Clapperboard size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
+              Scenes
+            </button>
+            <button 
               className={`tab-btn ${leftTab === 'csv' ? 'active' : ''}`}
               onClick={() => setLeftTab('csv')}
               style={{ padding: '10px 4px', fontSize: '10px' }}
             >
               <Database size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
-              CSV Data
+              CSV
             </button>
             <button 
               className={`tab-btn ${leftTab === 'boilerplates' ? 'active' : ''}`}
@@ -757,7 +986,7 @@ export default function App() {
               style={{ padding: '10px 4px', fontSize: '10px' }}
             >
               <Code size={12} style={{ display: 'block', margin: '0 auto 4px auto' }} />
-              Templates
+              Code
             </button>
           </div>
 
@@ -855,7 +1084,10 @@ export default function App() {
                 <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid hsl(var(--border-color))' }}>
                   <label style={{ fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
                     <Globe size={12} style={{ color: 'hsl(var(--accent-cyan))' }} />
-                    Crawl Website Link
+                    Website Link (HyperFrames Capture)
+                    <span style={{ marginLeft: 'auto', color: serverOnline ? 'hsl(var(--accent-green))' : 'hsl(var(--text-muted))' }}>
+                      API {serverOnline ? 'online' : 'offline'}
+                    </span>
                   </label>
                   <div style={{ display: 'flex', gap: '6px' }}>
                     <input 
@@ -871,12 +1103,13 @@ export default function App() {
                       disabled={isCrawling}
                       style={{ padding: '0 10px', fontSize: '11px' }}
                     >
-                      {isCrawling ? 'Crawling...' : 'Crawl'}
+                      {isCrawling ? 'Capturing...' : 'Capture'}
                     </button>
                   </div>
                   {scrapedDataText && (
                     <div style={{ fontSize: '10px', color: 'hsl(var(--accent-green))', marginTop: '6px', fontWeight: '600' }}>
-                      ✓ Webpage scraped successfully ({scrapedDataText.length} chars)
+                      ✓ Source ready ({scrapedDataText.length} chars)
+                      {contentBrief?.assets?.length ? ` · ${contentBrief.assets.length} screenshots` : ''}
                     </div>
                   )}
                   
@@ -890,6 +1123,31 @@ export default function App() {
                       style={{ width: '100%', marginTop: '6px', background: 'hsl(var(--bg-main))', color: '#fff', fontSize: '11px', border: '1px solid hsl(var(--border-color))', borderRadius: '4px', padding: '6px' }}
                     />
                   </details>
+                </div>
+
+                {/* Screenshot / Image Upload */}
+                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid hsl(var(--border-color))' }}>
+                  <label style={{ fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
+                    <ImageIcon size={12} style={{ color: 'hsl(var(--accent-cyan))' }} />
+                    Website Screenshot / Image
+                  </label>
+                  <div 
+                    className="upload-card"
+                    onClick={() => screenshotInputRef.current?.click()}
+                    style={{ padding: '12px', cursor: 'pointer' }}
+                  >
+                    <Upload size={14} style={{ color: 'hsl(var(--accent-cyan))' }} />
+                    <span style={{ fontSize: '11px', fontWeight: '500' }}>
+                      {screenshotAsset?.filename || screenshotAsset?.storedName || 'Upload Screenshot'}
+                    </span>
+                    <input 
+                      type="file"
+                      ref={screenshotInputRef}
+                      onChange={handleScreenshotUpload}
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      style={{ display: 'none' }}
+                    />
+                  </div>
                 </div>
 
                 {/* PDF Document Upload */}
@@ -929,7 +1187,7 @@ export default function App() {
 
                 {aiLoading ? (
                   <div style={{ textAlign: 'center', padding: '10px 0' }}>
-                    <div style={{ fontSize: '12px', marginBottom: '6px' }}>Generating composition overlays...</div>
+                    <div style={{ fontSize: '12px', marginBottom: '6px' }}>Generating multi-scene HyperFrames project...</div>
                     <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
                       <div className="template-progress-fill" style={{ width: '60%', height: '100%' }}></div>
                     </div>
@@ -937,8 +1195,153 @@ export default function App() {
                 ) : (
                   <button className="action-btn" onClick={handleTriggerAI}>
                     <Sparkles size={14} />
-                    Generate Cinematic Intro
+                    Generate Animated Video
                   </button>
+                )}
+              </div>
+            )}
+
+            {/* SCENES EDITOR TAB */}
+            {leftTab === 'scenes' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h3 className="sidebar-title" style={{ margin: 0 }}>
+                    <Clapperboard size={14} />
+                    Scene Timeline
+                  </h3>
+                  <span style={{ fontSize: '10px', color: 'hsl(var(--text-muted))' }}>
+                    {getProjectDuration(project).toFixed(1)}s · {project.scenes.length} scenes
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {[
+                    ['title-card', 'Title'],
+                    ['bullet-explainer', 'Bullets'],
+                    ['screenshot-kenburns', 'Ken Burns'],
+                    ['quote', 'Quote'],
+                    ['cta-outro', 'CTA']
+                  ].map(([tpl, label]) => (
+                    <button
+                      key={tpl}
+                      className="action-btn secondary"
+                      style={{ padding: '4px 8px', fontSize: '10px' }}
+                      onClick={() => handleAddScene(tpl)}
+                    >
+                      + {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {project.scenes.map((scene, index) => (
+                    <div
+                      key={scene.id}
+                      onClick={() => setSelectedSceneId(scene.id)}
+                      style={{
+                        padding: '10px',
+                        borderRadius: '8px',
+                        border: `1px solid ${selectedScene?.id === scene.id ? 'hsl(var(--accent-cyan))' : 'hsl(var(--border-color))'}`,
+                        background: selectedScene?.id === scene.id ? 'rgba(103,232,249,0.08)' : 'rgba(255,255,255,0.02)',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' }}>
+                        <div>
+                          <div style={{ fontSize: '11px', fontWeight: 700 }}>{index + 1}. {scene.title}</div>
+                          <div style={{ fontSize: '10px', color: 'hsl(var(--text-muted))', marginTop: '2px' }}>
+                            {scene.template} · {Number(scene.duration).toFixed(1)}s
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '2px' }}>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); handleMoveScene(scene.id, 'up'); }}>
+                            <ArrowUp size={12} />
+                          </button>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); handleMoveScene(scene.id, 'down'); }}>
+                            <ArrowDown size={12} />
+                          </button>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); setProject((p) => duplicateScene(p, scene.id)); }}>
+                            <Copy size={12} />
+                          </button>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); setProject((p) => removeScene(p, scene.id)); }}>
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {selectedScene && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', paddingTop: '8px', borderTop: '1px solid hsl(var(--border-color))' }}>
+                    <div className="form-group">
+                      <label>Scene Title</label>
+                      <input value={selectedScene.title} onChange={(e) => handleUpdateSelectedScene('title', e.target.value)} />
+                    </div>
+                    <div className="form-group">
+                      <label>Subtitle / CTA</label>
+                      <input value={selectedScene.subtitle || ''} onChange={(e) => handleUpdateSelectedScene('subtitle', e.target.value)} />
+                    </div>
+                    <div className="form-group">
+                      <label>Template</label>
+                      <select value={selectedScene.template} onChange={(e) => handleUpdateSelectedScene('template', e.target.value)}>
+                        <option value="title-card">Title Card</option>
+                        <option value="bullet-explainer">Bullet Explainer</option>
+                        <option value="screenshot-kenburns">Screenshot Ken Burns</option>
+                        <option value="quote">Quote</option>
+                        <option value="cta-outro">CTA Outro</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Duration (s)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.1"
+                        value={selectedScene.duration}
+                        onChange={(e) => handleUpdateSelectedScene('duration', parseFloat(e.target.value) || 3)}
+                      />
+                    </div>
+                    {selectedScene.template === 'bullet-explainer' && (
+                      <div className="form-group">
+                        <label>Bullets (one per line)</label>
+                        <textarea
+                          rows="4"
+                          value={(selectedScene.bullets || []).join('\n')}
+                          onChange={(e) => handleUpdateSelectedScene('bullets', e.target.value.split('\n').filter(Boolean))}
+                        />
+                      </div>
+                    )}
+                    {(selectedScene.template === 'screenshot-kenburns') && (
+                      <div className="form-group">
+                        <label>Image URL</label>
+                        <input
+                          value={selectedScene.imageUrl || selectedScene.background?.value || ''}
+                          onChange={(e) => {
+                            handleUpdateSelectedScene('imageUrl', e.target.value);
+                            handleUpdateSelectedScene('background', { type: 'image', value: e.target.value });
+                          }}
+                          placeholder="/api/assets/... or https://..."
+                        />
+                      </div>
+                    )}
+                    <div className="form-group">
+                      <label>Accent Color</label>
+                      <input
+                        type="color"
+                        value={selectedScene.accentColor || project.brand?.colors?.[1] || '#67e8f9'}
+                        onChange={(e) => handleUpdateSelectedScene('accentColor', e.target.value)}
+                      />
+                    </div>
+                    <button className="action-btn secondary" onClick={() => {
+                      if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+                      setHfPreviewUrl(generateFullCompositionHTML());
+                      setShowHyperFramesPreview(true);
+                    }}>
+                      <Play size={14} />
+                      Preview Scenes in HyperFrames
+                    </button>
+                  </div>
                 )}
               </div>
             )}
@@ -1460,19 +1863,23 @@ export default function App() {
             {activeRightTab === 'export' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
                 <div>
-                  <h4 style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '8px' }}>Bake & Render Video</h4>
+                  <h4 style={{ fontSize: '13px', fontWeight: 'bold', marginBottom: '8px' }}>HyperFrames MP4 Render</h4>
                   <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', lineHeight: '1.4' }}>
-                    Render the video composition in the client's browser, capturing and combining video tracks, text styling, badges, and progress bar elements.
+                    Frame-accurate render via @hyperframes/producer (Chrome + FFmpeg). Primary export for high-graphic animated videos.
                   </p>
                 </div>
 
                 <div style={{ padding: '16px', background: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border-color))', borderRadius: '8px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '8px' }}>
-                    <span>Active Trim:</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{(cropEnd - cropStart).toFixed(1)}s</span>
+                    <span>Scenes:</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{project.scenes.length}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '8px' }}>
-                    <span>Total Overlays:</span>
+                    <span>Composition Length:</span>
+                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{getProjectDuration(project).toFixed(1)}s</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', marginBottom: '8px' }}>
+                    <span>Overlays (canvas):</span>
                     <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 'bold' }}>{overlays.length}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
@@ -1481,28 +1888,58 @@ export default function App() {
                       {aspectRatio === 'landscape' ? '1920x1080 (16:9)' : aspectRatio === 'portrait' ? '1080x1920 (9:16)' : '1080x1080 (1:1)'}
                     </span>
                   </div>
+                  <div style={{ fontSize: '10px', marginTop: '10px', color: serverOnline ? 'hsl(var(--accent-green))' : '#f87171' }}>
+                    Render API: {serverOnline ? 'connected' : 'offline — run npm run dev'}
+                  </div>
                 </div>
 
-                {isExporting ? (
+                {isHfRendering ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
-                      <span>Compositing Frames...</span>
-                      <span>{exportProgress}%</span>
+                      <span>{hfRenderStatus || 'Rendering…'}</span>
+                      <span>{hfRenderProgress}%</span>
                     </div>
                     <div style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
-                      <div style={{ width: `${exportProgress}%`, height: '100%', background: 'linear-gradient(90deg, hsl(var(--accent-purple)), hsl(var(--accent-cyan)))' }}></div>
+                      <div style={{ width: `${hfRenderProgress}%`, height: '100%', background: 'linear-gradient(90deg, hsl(var(--accent-cyan)), hsl(var(--accent-purple)))' }}></div>
                     </div>
                   </div>
                 ) : (
                   <button 
                     className="action-btn"
-                    onClick={handleExport}
+                    onClick={handleHyperFramesRender}
                     style={{ width: '100%' }}
                   >
                     <Download size={16} />
-                    Start Local Browser Compile
+                    Render HyperFrames MP4
                   </button>
                 )}
+
+                <div style={{ borderTop: '1px solid hsl(var(--border-color))', paddingTop: '16px' }}>
+                  <h4 style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '8px' }}>Quick Draft (Browser)</h4>
+                  <p style={{ fontSize: '10px', color: 'hsl(var(--text-muted))', lineHeight: '1.4', marginBottom: '10px' }}>
+                    Optional MediaRecorder overlay bake — lower fidelity than HyperFrames.
+                  </p>
+                  {isExporting ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px' }}>
+                        <span>Compositing Frames...</span>
+                        <span>{exportProgress}%</span>
+                      </div>
+                      <div style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                        <div style={{ width: `${exportProgress}%`, height: '100%', background: 'linear-gradient(90deg, hsl(var(--accent-purple)), hsl(var(--accent-cyan)))' }}></div>
+                      </div>
+                    </div>
+                  ) : (
+                    <button 
+                      className="action-btn secondary"
+                      onClick={handleExport}
+                      style={{ width: '100%' }}
+                    >
+                      <Download size={16} />
+                      Start Local Browser Compile
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

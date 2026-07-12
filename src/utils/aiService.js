@@ -1,7 +1,7 @@
 /**
  * AI Service Driver for MotionForge AI
  * Handles client-side API requests to Gemini, OpenAI, and Anthropic,
- * webpage crawling via a CORS proxy, and PDF base64 payloads.
+ * webpage crawling via a CORS proxy (legacy), and multi-scene HyperFrames projects.
  */
 
 // Crawl an external webpage using a sequence of public CORS proxies for high reliability
@@ -39,7 +39,7 @@ export async function scrapeWebsite(url) {
           const contents = await proxy.parse(response);
           if (contents && contents.trim().length > 100) {
             htmlString = contents;
-            break; // Got valid HTML content, stop trying
+            break;
           }
         }
       } catch (err) {
@@ -52,29 +52,25 @@ export async function scrapeWebsite(url) {
       throw new Error(lastError ? lastError.message : 'All public CORS proxies failed to fetch the website content.');
     }
 
-    // Parse HTML content in the browser
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlString, 'text/html');
-    
-    // Extract metadata
+
     const title = doc.title || 'Untitled Webpage';
-    
+
     let description = '';
     const metaDesc = doc.querySelector('meta[name="description"]') || doc.querySelector('meta[property="og:description"]');
     if (metaDesc) {
       description = metaDesc.getAttribute('content') || '';
     }
 
-    // Extract headers
     const headings = Array.from(doc.querySelectorAll('h1, h2, h3'))
-      .map(h => h.textContent.trim())
+      .map((h) => h.textContent.trim())
       .slice(0, 10)
       .join('\n- ');
 
-    // Extract body paragraph paragraphs
     const paragraphs = Array.from(doc.querySelectorAll('p'))
-      .map(p => p.textContent.trim())
-      .filter(t => t.length > 20)
+      .map((p) => p.textContent.trim())
+      .filter((t) => t.length > 20)
       .slice(0, 8)
       .join('\n');
 
@@ -93,93 +89,105 @@ ${paragraphs.substring(0, 1500)}`;
   }
 }
 
-// Generate the JSON composition payload using AI models
-export async function generateAIComposition({
-  provider,
-  model,
-  apiKey,
-  promptText,
-  fileBase64, // base64 string for PDF
-  pdfText, // extracted text from PDF
-  webpageText,
-  proxyUrl = ''
-}) {
-  // 1. Build the system prompt rules and response structure
-  const systemPrompt = `You are an expert cinematic motion graphics director and video editor.
-Analyze the provided inputs (which may include webpage crawls, PDF documents, or prompts) and generate a timed video composition.
-Your response MUST be a single, raw JSON object. Do NOT include markdown code blocks, do NOT write any intro or explanation.
+const SCENE_SYSTEM_PROMPT = `You are an expert cinematic motion graphics director building HyperFrames HTML video scenes.
+Analyze the inputs (PDF text, website brief, screenshots, or prompts) and generate a multi-scene animated video project.
+Your response MUST be a single raw JSON object. No markdown fences, no commentary.
 
-The JSON schema must match exactly:
+JSON schema:
 {
   "aspectRatio": "landscape" | "portrait" | "square",
-  "videoDuration": 8, // length in seconds, default between 6 and 12
+  "name": "Short project title",
+  "brand": {
+    "colors": ["#0a0a0f", "#67e8f9", "#a855f7", "#ffffff"],
+    "fonts": ["Outfit", "Inter"]
+  },
+  "scenes": [
+    {
+      "title": "Scene headline (short)",
+      "subtitle": "Optional supporting line",
+      "template": "title-card" | "bullet-explainer" | "screenshot-kenburns" | "quote" | "cta-outro",
+      "duration": 4.0,
+      "bullets": ["Only for bullet-explainer, 3-5 short points"],
+      "imageUrl": "optional absolute or /api/... screenshot URL for ken-burns",
+      "background": { "type": "gradient" | "color" | "image", "value": "css color, gradient, or image url" },
+      "accentColor": "#67e8f9",
+      "transition": "fade",
+      "layers": []
+    }
+  ],
   "overlays": [
     {
-      "id": "unique-id-string",
-      "name": "Human-Readable Preset Name",
-      "text": "Overlay text content (keep concise, fit for visual presentation)",
-      "start": 1.5, // start time in seconds
-      "duration": 4.0, // length visible in seconds
-      "fontSize": 52, // font size in px (base 1080p width)
-      "textColor": "#ffffff", // hex code
-      "accentColor": "#a855f7", // accent hex code (for neon glows, badges, bars)
-      "x": 50, // center x coordinate in % (0 - 100)
-      "y": 40, // center y coordinate in % (0 - 100)
-      "trackIndex": 1, // z-index ordering (1, 2, 3...)
+      "id": "optional-compat-overlay",
+      "name": "Legacy overlay name",
+      "text": "Short overlay text",
+      "start": 1.0,
+      "duration": 3.0,
+      "fontSize": 48,
+      "textColor": "#ffffff",
+      "accentColor": "#67e8f9",
+      "x": 50,
+      "y": 40,
+      "trackIndex": 1,
       "animationType": "neon" | "spring" | "cyberpunk" | "fade" | "progress"
     }
   ]
 }
 
-Animation Types guide:
-- "neon": Big bold glowing title (best for top titles, main features).
-- "spring": Bouncy badge/bubble (best for tags, call-outs, labels).
-- "cyberpunk": Glitched lower third (best for descriptions, names, tech logs).
-- "fade": Standard subtitles/captions (best for long explanation text at bottom).
-- "progress": Progress tracker (best for showing visual flow at bottom).
+Rules:
+1. Produce 4–8 scenes that tell a clear narrative: hook → points → visual proof → CTA.
+2. Prefer "screenshot-kenburns" when screenshot/image asset URLs are provided.
+3. Prefer "bullet-explainer" for PDF section summaries.
+4. End with "cta-outro".
+5. Keep titles under 8 words; bullets under 12 words each.
+6. Also include a flat "overlays" array (6–12 items) for the live canvas editor, timed across the full video.
+7. videoDuration is implied by sum of scene durations; also set "videoDuration" to that sum.
+8. Use brand colors from the content brief when provided.`;
 
-Ensure that:
-1. Elements do not overlap in spatial coordinates (X and Y) at the same time.
-2. Timings flow sequentially to create a narrative (e.g. Intro -> Core Point -> Highlight Badge -> CTA / End Progress).
-3. The video duration encompasses all overlay timings.`;
+/**
+ * Generate a multi-scene HyperFrames project (+ legacy overlays for canvas editing).
+ */
+export async function generateAIComposition({
+  provider,
+  model,
+  apiKey,
+  promptText,
+  fileBase64,
+  pdfText,
+  webpageText,
+  contentBrief = null,
+  imageBase64 = null,
+  imageMimeType = 'image/png',
+  proxyUrl = ''
+}) {
+  const briefBlock = contentBrief
+    ? `\n\nCONTENT BRIEF (JSON):\n${JSON.stringify(contentBrief, null, 2)}`
+    : '';
 
-  const userQuery = `Prompt/Goal: ${promptText || 'Create an engaging product showcase video.'}
+  const userQuery = `Prompt/Goal: ${promptText || 'Create a high-graphic animated product explainer video.'}
 ${webpageText ? `\n\nCrawled Website Data:\n${webpageText}` : ''}
 ${pdfText ? `\n\nExtracted PDF Text:\n${pdfText}` : ''}
-${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as binary]` : ''}`;
+${briefBlock}
+${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as binary]` : ''}
+${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as binary — use for ken-burns scenes]` : ''}`;
 
-  // 2. Route request to selected provider
   if (provider === 'gemini') {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    
-    const contents = [];
-    
-    // Add PDF base64 if present
+    const parts = [{ text: `${SCENE_SYSTEM_PROMPT}\n\n${userQuery}` }];
+
     if (fileBase64) {
-      contents.push({
-        role: 'user',
-        parts: [
-          {
-            inlineData: {
-              mimeType: 'application/pdf',
-              data: fileBase64
-            }
-          },
-          { text: `${systemPrompt}\n\n${userQuery}` }
-        ]
+      parts.unshift({
+        inlineData: { mimeType: 'application/pdf', data: fileBase64 }
       });
-    } else {
-      contents.push({
-        role: 'user',
-        parts: [{ text: `${systemPrompt}\n\n${userQuery}` }]
+    }
+    if (imageBase64) {
+      parts.unshift({
+        inlineData: { mimeType: imageMimeType || 'image/png', data: imageBase64 }
       });
     }
 
     const payload = {
-      contents,
-      generationConfig: {
-        responseMimeType: 'application/json'
-      }
+      contents: [{ role: 'user', parts }],
+      generationConfig: { responseMimeType: 'application/json' }
     };
 
     const res = await fetch(url, {
@@ -195,15 +203,15 @@ ${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as bi
 
     const data = await res.json();
     const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    return parseJSONContent(rawText);
+    return normalizeAIResult(parseJSONContent(rawText));
   }
 
-  else if (provider === 'openai') {
-    const url = `https://api.openai.com/v1/chat/completions`;
+  if (provider === 'openai') {
+    const url = 'https://api.openai.com/v1/chat/completions';
     const payload = {
       model,
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: SCENE_SYSTEM_PROMPT },
         { role: 'user', content: userQuery }
       ],
       response_format: { type: 'json_object' }
@@ -213,7 +221,7 @@ ${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as bi
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify(payload)
     });
@@ -224,33 +232,25 @@ ${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as bi
     }
 
     const data = await res.json();
-    const rawText = data.choices?.[0]?.message?.content;
-    return parseJSONContent(rawText);
+    return normalizeAIResult(parseJSONContent(data.choices?.[0]?.message?.content));
   }
 
-  else if (provider === 'claude') {
-    // Note: Anthropics has strict CORS controls. We route through a proxy if supplied, or direct fetch.
+  if (provider === 'claude') {
     const baseUrl = proxyUrl || 'https://api.anthropic.com/v1/messages';
-    
     const payload = {
       model,
-      max_tokens: 4000,
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: userQuery }
-      ]
-    };
-
-    const headers = {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerously-allow-host': 'true' // bypass library warning
+      max_tokens: 5000,
+      system: SCENE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userQuery }]
     };
 
     const res = await fetch(baseUrl, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
       body: JSON.stringify(payload)
     });
 
@@ -260,42 +260,125 @@ ${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as bi
     }
 
     const data = await res.json();
-    const rawText = data.content?.[0]?.text;
-    return parseJSONContent(rawText);
+    return normalizeAIResult(parseJSONContent(data.content?.[0]?.text));
   }
 
   throw new Error('Unsupported API provider selected.');
 }
 
-// Extract JSON out of LLM text response safely
 function parseJSONContent(text) {
   if (!text) throw new Error('Empty response from AI model.');
-  
+
   let cleanText = text.trim();
-  
-  // Strip markdown code blocks if the model wrapped it in ```json ... ```
-  if (cleanText.startsWith('```json')) {
-    cleanText = cleanText.substring(7);
-  } else if (cleanText.startsWith('```')) {
-    cleanText = cleanText.substring(3);
-  }
-  if (cleanText.endsWith('```')) {
-    cleanText = cleanText.substring(0, cleanText.length - 3);
-  }
-  
+  if (cleanText.startsWith('```json')) cleanText = cleanText.substring(7);
+  else if (cleanText.startsWith('```')) cleanText = cleanText.substring(3);
+  if (cleanText.endsWith('```')) cleanText = cleanText.substring(0, cleanText.length - 3);
   cleanText = cleanText.trim();
-  
+
   try {
-    const parsed = JSON.parse(cleanText);
-    
-    // Validate output structure
-    if (!parsed.aspectRatio || !parsed.videoDuration || !Array.isArray(parsed.overlays)) {
-      throw new Error('Invalid JSON structure. Missing required properties.');
-    }
-    
-    return parsed;
+    return JSON.parse(cleanText);
   } catch (err) {
     console.error('Failed to parse AI output:', cleanText);
     throw new Error(`Failed to parse AI response into video tracks: ${err.message}`);
   }
+}
+
+/**
+ * Normalize AI JSON into { aspectRatio, videoDuration, overlays, scenes, brand, name }
+ * so both the new scene editor and legacy overlay canvas work.
+ */
+function normalizeAIResult(parsed) {
+  const scenes = Array.isArray(parsed.scenes) ? parsed.scenes : null;
+  let overlays = Array.isArray(parsed.overlays) ? parsed.overlays : [];
+
+  const sceneDuration = scenes
+    ? scenes.reduce((sum, s) => sum + (Number(s.duration) || 4), 0)
+    : 0;
+
+  const videoDuration = Number(parsed.videoDuration) || sceneDuration || 10;
+  const aspectRatio = parsed.aspectRatio || 'landscape';
+
+  // Synthesize overlays from scenes if missing
+  if (!overlays.length && scenes?.length) {
+    let t = 0;
+    overlays = scenes.flatMap((scene, i) => {
+      const items = [
+        {
+          id: `ai-scene-${i}-title`,
+          name: scene.title || `Scene ${i + 1}`,
+          text: scene.title || `Scene ${i + 1}`,
+          start: t + 0.25,
+          duration: Math.min(3.2, (scene.duration || 4) - 0.4),
+          fontSize: scene.template === 'title-card' ? 64 : 42,
+          textColor: '#ffffff',
+          accentColor: scene.accentColor || parsed.brand?.colors?.[1] || '#67e8f9',
+          x: 50,
+          y: scene.template === 'cta-outro' ? 40 : 35,
+          trackIndex: i + 1,
+          animationType: scene.template === 'cta-outro' ? 'spring' : 'neon'
+        }
+      ];
+      (scene.bullets || []).slice(0, 3).forEach((b, bi) => {
+        items.push({
+          id: `ai-scene-${i}-b${bi}`,
+          name: `Bullet ${bi + 1}`,
+          text: b,
+          start: t + 0.8 + bi * 0.7,
+          duration: 2.4,
+          fontSize: 28,
+          textColor: '#ffffff',
+          accentColor: scene.accentColor || '#67e8f9',
+          x: 50,
+          y: 55 + bi * 10,
+          trackIndex: i + 10 + bi,
+          animationType: 'fade'
+        });
+      });
+      t += scene.duration || 4;
+      return items;
+    });
+  }
+
+  if (!overlays.length) {
+    throw new Error('Invalid AI JSON: missing scenes and overlays');
+  }
+
+  return {
+    name: parsed.name || 'AI Composition',
+    aspectRatio,
+    videoDuration,
+    brand: parsed.brand || {
+      colors: ['#0a0a0f', '#67e8f9', '#a855f7', '#ffffff'],
+      fonts: ['Outfit', 'Inter']
+    },
+    scenes: scenes || null,
+    overlays,
+    sourceMeta: parsed.sourceMeta || null
+  };
+}
+
+/**
+ * Build a local content brief from PDF text (client-side).
+ */
+export function briefFromPdfText(pdfText, filename = 'document.pdf') {
+  const lines = String(pdfText || '')
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const headings = lines.filter((l) => l.length < 80 && !l.endsWith('.')).slice(0, 8);
+  const bullets = lines.filter((l) => l.length > 40).slice(0, 6).map((l) => l.slice(0, 120));
+
+  return {
+    title: headings[0] || filename.replace(/\.pdf$/i, ''),
+    bullets,
+    sections: headings.slice(0, 5).map((h) => ({
+      heading: h,
+      points: ['Summarize key idea', 'Add a supporting visual beat']
+    })),
+    assets: [],
+    brand: { colors: ['#0a0a0f', '#67e8f9', '#ffffff'], fonts: ['Outfit', 'Inter'] },
+    sourceType: 'document',
+    rawNotes: String(pdfText || '').slice(0, 6000)
+  };
 }

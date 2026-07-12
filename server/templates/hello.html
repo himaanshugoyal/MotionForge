@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MotionForge Hello Render</title>
+  <script src="./vendor/gsap.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a0a0f;
+      color: #fff;
+      font-family: system-ui, sans-serif;
+    }
+    #root {
+      position: relative;
+      width: 1920px;
+      height: 1080px;
+      background: radial-gradient(ellipse at 30% 20%, #1a1040 0%, #0a0a0f 55%, #061018 100%);
+    }
+    .title {
+      position: absolute;
+      left: 50%;
+      top: 46%;
+      transform: translate(-50%, -50%);
+      font-size: 96px;
+      font-weight: 800;
+      letter-spacing: -2px;
+      margin: 0;
+      opacity: 0;
+    }
+    .subtitle {
+      position: absolute;
+      left: 50%;
+      top: 58%;
+      transform: translate(-50%, -50%);
+      font-size: 28px;
+      font-weight: 700;
+      color: #67e8f9;
+      opacity: 0;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"
+       data-composition-id="hello-motionforge"
+       data-start="0"
+       data-duration="3"
+       data-width="1920"
+       data-height="1080">
+    <h1 id="title" class="title" data-start="0" data-duration="3" data-track-index="1">MotionForge</h1>
+    <p id="subtitle" class="subtitle" data-start="0.4" data-duration="2.6" data-track-index="2">HyperFrames Render Online</p>
+  </div>
+  <script>
+    (function () {
+      window.__timelines = window.__timelines || {};
+      if (typeof gsap === 'undefined') {
+        document.getElementById('root').setAttribute('data-no-timeline', 'true');
+        document.getElementById('title').style.opacity = '1';
+        document.getElementById('subtitle').style.opacity = '1';
+        return;
+      }
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo('#title', { opacity: 0, y: 40, scale: 0.92 }, { opacity: 1, y: 0, scale: 1, duration: 0.8, ease: 'power3.out' }, 0);
+      tl.fromTo('#subtitle', { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.6, ease: 'power2.out' }, 0.35);
+      window.__timelines['hello-motionforge'] = tl;
+    })();
+  </script>
+</body>
+</html>
