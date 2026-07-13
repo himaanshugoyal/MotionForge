@@ -105,7 +105,7 @@ const SAMPLE_VIDEOS = [
 ];
 
 const MODEL_OPTIONS = {
-  gemini: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash'],
+  gemini: ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro-latest', 'gemini-1.5-pro'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
   claude: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229']
 };
@@ -166,7 +166,7 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => {
     return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('mf_key') || '';
   });
-  const [apiModel, setApiModel] = useState('gemini-1.5-flash');
+  const [apiModel, setApiModel] = useState('gemini-1.5-flash-latest');
   const [showConfig, setShowConfig] = useState(false);
 
   // AI Generation Inputs
