@@ -128,7 +128,8 @@ export default function TimelinePanel({
   onTrimVideoClip,
   onMoveVideoClip,
   onSplitVideoClip,
-  onAutoTrimSilence
+  onAutoTrimSilence,
+  onAutoGenerateGraphics
 }) {
   const videoTrackRef = useRef(null);
   const [dragOverVideo, setDragOverVideo] = useState(false);
@@ -325,6 +326,17 @@ export default function TimelinePanel({
             >
               <Wand2 size={13} />
               Auto Trim
+            </button>
+            <button
+              type="button"
+              className={`tl-tool-btn auto-trim ${selectedVideoClipId ? '' : 'disabled'}`}
+              title="Auto Generate Graphics from Speech"
+              disabled={!selectedVideoClipId}
+              onClick={() => onAutoGenerateGraphics && onAutoGenerateGraphics()}
+              style={{ color: 'hsl(var(--accent-purple))', borderColor: 'rgba(168, 85, 247, 0.4)' }}
+            >
+              <Wand2 size={13} />
+              Auto-GFX
             </button>
           </div>
         </div>

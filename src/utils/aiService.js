@@ -510,3 +510,75 @@ export function briefFromPdfText(pdfText, filename = 'document.pdf') {
     rawNotes: String(pdfText || '').slice(0, 6000)
   };
 }
+
+/**
+ * Analyze speech audio to generate synced graphics overlays.
+ */
+const SPEECH_GFX_SYSTEM_PROMPT = `You are an expert video editor. You will receive an audio clip of a speaker.
+1. Transcribe the speech.
+2. Identify key educational moments, points, or quotes.
+3. Output a precise JSON array of overlays mapped exactly to the timestamps (in seconds) where they occur in the audio.
+
+Your response MUST be a single raw JSON array. No markdown fences, no commentary.
+
+JSON schema:
+[
+  {
+    "id": "auto-gfx-1",
+    "name": "Auto Title",
+    "text": "The main point they just said",
+    "start": 2.5,
+    "duration": 3.0,
+    "fontSize": 48,
+    "textColor": "#ffffff",
+    "accentColor": "#67e8f9",
+    "x": 50,
+    "y": 80,
+    "trackIndex": 1,
+    "animationType": "fade"
+  }
+]
+
+Allowed animationTypes: "neon", "spring", "cyberpunk", "fade".
+Keep text concise. Ensure \`start\` and \`duration\` match the audio exactly.`;
+
+export async function analyzeSpeechAndGenerateGraphics({
+  apiKey,
+  model,
+  audioBase64,
+  audioMimeType = 'audio/wav'
+}) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType: audioMimeType, data: audioBase64 } },
+        { text: SPEECH_GFX_SYSTEM_PROMPT }
+      ]
+    }],
+    generationConfig: { responseMimeType: 'application/json' }
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `Gemini API returned status ${res.status}`);
+  }
+
+  const data = await res.json();
+  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  
+  try {
+    const parsed = JSON.parse(rawText.replace(/```json/g, '').replace(/```/g, '').trim());
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    throw new Error('Failed to parse AI response as JSON array');
+  }
+}

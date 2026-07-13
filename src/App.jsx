@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
-import { scrapeWebsite, generateAIComposition, briefFromPdfText, enhanceAIPrompt } from './utils/aiService';
+import { scrapeWebsite, generateAIComposition, briefFromPdfText, enhanceAIPrompt, analyzeSpeechAndGenerateGraphics } from './utils/aiService';
 import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
 import {
   createProject,
@@ -78,7 +78,7 @@ import {
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
-import { fetchAndDecodePeaks, detectAudioSegments } from './utils/audioWaveform';
+import { fetchAndDecodePeaks, detectAudioSegments, extractAudioAsWavBase64 } from './utils/audioWaveform';
 import toast, { Toaster } from 'react-hot-toast';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -960,6 +960,61 @@ export default function App() {
         return moveClip(base, newTimelineStart);
       })
     );
+  };
+
+  const handleAutoGenerateGraphics = async () => {
+    if (!selectedVideoClipId) return;
+    const clip = videoClips.find(c => c.id === selectedVideoClipId);
+    if (!clip || !clip.url) return;
+    
+    if (apiProvider !== 'gemini') {
+      toast.error('Auto-GFX requires the Gemini API. Please switch your provider in API Keys settings.');
+      return;
+    }
+    if (!apiKey) {
+      toast.error('Please configure your Gemini API Key first.');
+      setShowConfig(true);
+      return;
+    }
+
+    commitPendingHistory();
+    setAiLoading(true);
+
+    try {
+      toast('Extracting audio track...', { icon: '🎧' });
+      const audioBase64 = await extractAudioAsWavBase64(clip.url, clip.sourceIn, clip.sourceOut);
+      if (!audioBase64) {
+        throw new Error('Failed to extract audio from the clip.');
+      }
+
+      toast('Analyzing speech...', { icon: '🧠' });
+      const generatedOverlays = await analyzeSpeechAndGenerateGraphics({
+        apiKey,
+        model: apiModel,
+        audioBase64
+      });
+
+      if (!generatedOverlays || generatedOverlays.length === 0) {
+        toast.error('AI found no suitable moments for graphics.');
+        return;
+      }
+
+      // Map overlays to timeline and merge
+      const newOverlays = generatedOverlays.map(o => ({
+        ...o,
+        id: `auto-gfx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        start: clip.timelineStart + (o.start || 0)
+      }));
+
+      setOverlays(prev => [...prev, ...newOverlays]);
+      toast.success(`Generated ${newOverlays.length} synced graphics!`);
+      
+    } catch (err) {
+      console.error(err);
+      toast.error(`Auto-GFX failed: ${err.message}`);
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const handleAutoTrimSilence = async () => {
@@ -2532,6 +2587,7 @@ export default function App() {
             onMoveVideoClip={handleMoveVideoClip}
             onSplitVideoClip={handleSplitVideoClip}
             onAutoTrimSilence={handleAutoTrimSilence}
+            onAutoGenerateGraphics={handleAutoGenerateGraphics}
           />
         </main>
 
