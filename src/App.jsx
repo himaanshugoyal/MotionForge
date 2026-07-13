@@ -28,7 +28,9 @@ import {
   Image as ImageIcon,
   ArrowUp,
   ArrowDown,
-  Clapperboard
+  Clapperboard,
+  Undo,
+  Redo
 } from 'lucide-react';
 import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
@@ -200,6 +202,155 @@ export default function App() {
   videoClipsRef.current = videoClips;
   isPlayingRef.current = isPlaying;
   currentTimeRef.current = currentTime;
+
+  // Undo/Redo History State
+  const [past, setPast] = useState([]);
+  const [future, setFuture] = useState([]);
+  const lastSavedStateRef = useRef(null);
+  const timeoutRef = useRef(null);
+  const isUndoRedoRef = useRef(false);
+
+  // Initialize the last saved state ref
+  useEffect(() => {
+    if (!lastSavedStateRef.current) {
+      lastSavedStateRef.current = {
+        project,
+        videoClips,
+        overlays,
+        aspectRatio,
+        videoUrl
+      };
+    }
+  }, [project, videoClips, overlays, aspectRatio, videoUrl]);
+
+  // Watch for state changes to save to history (with debounce)
+  useEffect(() => {
+    if (isUndoRedoRef.current) return;
+
+    const currentState = {
+      project,
+      videoClips,
+      overlays,
+      aspectRatio,
+      videoUrl
+    };
+
+    if (!lastSavedStateRef.current) {
+      lastSavedStateRef.current = currentState;
+      return;
+    }
+
+    const changed = 
+      project !== lastSavedStateRef.current.project ||
+      videoClips !== lastSavedStateRef.current.videoClips ||
+      overlays !== lastSavedStateRef.current.overlays ||
+      aspectRatio !== lastSavedStateRef.current.aspectRatio ||
+      videoUrl !== lastSavedStateRef.current.videoUrl;
+
+    if (!changed) return;
+
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+
+    timeoutRef.current = setTimeout(() => {
+      const stateToPush = lastSavedStateRef.current;
+      setPast(prev => [...prev.slice(-99), stateToPush]);
+      setFuture([]); // Clear redo stack on new action
+      lastSavedStateRef.current = currentState;
+      timeoutRef.current = null;
+    }, 500);
+
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, [project, videoClips, overlays, aspectRatio, videoUrl]);
+
+  // Forces any pending debounced change to be committed immediately
+  const commitPendingHistory = () => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+      const stateToPush = lastSavedStateRef.current;
+      setPast(prev => [...prev.slice(-99), stateToPush]);
+      setFuture([]);
+      // Sync last saved state to the current state
+      lastSavedStateRef.current = {
+        project,
+        videoClips,
+        overlays,
+        aspectRatio,
+        videoUrl
+      };
+    }
+  };
+
+  const handleUndo = () => {
+    if (past.length === 0) return;
+
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+
+    isUndoRedoRef.current = true;
+
+    const previousState = past[past.length - 1];
+    const newPast = past.slice(0, -1);
+    const currentState = {
+      project,
+      videoClips,
+      overlays,
+      aspectRatio,
+      videoUrl
+    };
+
+    setPast(newPast);
+    setFuture(prev => [currentState, ...prev]);
+
+    setProject(previousState.project);
+    setVideoClips(previousState.videoClips);
+    setOverlays(previousState.overlays);
+    setAspectRatio(previousState.aspectRatio);
+    setVideoUrl(previousState.videoUrl);
+
+    lastSavedStateRef.current = previousState;
+
+    setTimeout(() => {
+      isUndoRedoRef.current = false;
+    }, 0);
+  };
+
+  const handleRedo = () => {
+    if (future.length === 0) return;
+
+    isUndoRedoRef.current = true;
+
+    const nextState = future[0];
+    const newFuture = future.slice(1);
+    const currentState = {
+      project,
+      videoClips,
+      overlays,
+      aspectRatio,
+      videoUrl
+    };
+
+    setPast(prev => [...prev, currentState]);
+    setFuture(newFuture);
+
+    setProject(nextState.project);
+    setVideoClips(nextState.videoClips);
+    setOverlays(nextState.overlays);
+    setAspectRatio(nextState.aspectRatio);
+    setVideoUrl(nextState.videoUrl);
+
+    lastSavedStateRef.current = nextState;
+
+    setTimeout(() => {
+      isUndoRedoRef.current = false;
+    }, 0);
+  };
 
   // CSV Inputs State
   const [csvContent, setCsvContent] = useState('');
@@ -641,6 +792,7 @@ export default function App() {
 
   /** Insert a library asset onto the Video (V1) track */
   const insertVideoClip = async (asset, timelineStart = null) => {
+    commitPendingHistory();
     if (!asset?.url) return null;
     const start =
       timelineStart != null
@@ -717,6 +869,7 @@ export default function App() {
   };
 
   const handleSplitVideoClip = (atTime = currentTime) => {
+    commitPendingHistory();
     const t = Number(atTime);
     const clips = videoClipsRef.current;
     const target =
@@ -743,6 +896,7 @@ export default function App() {
   };
 
   const handleDuplicateVideoClip = () => {
+    commitPendingHistory();
     if (!selectedVideoClip) return;
     const copy = duplicateClip(selectedVideoClip);
     setVideoClips((prev) => [...prev, copy]);
@@ -751,6 +905,7 @@ export default function App() {
   };
 
   const handleDeleteVideoClip = () => {
+    commitPendingHistory();
     if (!selectedVideoClipId) return;
     setVideoClips((prev) => prev.filter((c) => c.id !== selectedVideoClipId));
     setSelectedVideoClipId(null);
@@ -781,11 +936,29 @@ export default function App() {
     setActiveRightTab('properties');
   };
 
-  // Keyboard: Delete clip, D = duplicate, S = split at playhead
+  // Keyboard: Delete clip, D = duplicate, S = split at playhead, Ctrl+Z = undo, Ctrl+Y/Ctrl+Shift+Z = redo
   useEffect(() => {
     const onKey = (e) => {
       const tag = e.target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+
+      // Ctrl+Z (or Cmd+Z)
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+
+      // Ctrl+Y (or Cmd+Y)
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
 
       if (e.key === 's' || e.key === 'S') {
         const clips = videoClipsRef.current;
@@ -798,23 +971,19 @@ export default function App() {
       if (!selectedVideoClipId) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        setVideoClips((prev) => prev.filter((c) => c.id !== selectedVideoClipId));
-        setSelectedVideoClipId(null);
+        handleDeleteVideoClip();
       } else if (e.key === 'd' || e.key === 'D') {
         e.preventDefault();
-        const clip = videoClipsRef.current.find((c) => c.id === selectedVideoClipId);
-        if (!clip) return;
-        const copy = duplicateClip(clip);
-        setVideoClips((prev) => [...prev, copy]);
-        setSelectedVideoClipId(copy.id);
+        handleDuplicateVideoClip();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedVideoClipId]);
+  }, [selectedVideoClipId, past, future]);
 
   // Preset Template Adder
   const handleAddPreset = (preset) => {
+    commitPendingHistory();
     const newId = `${preset.id}-${Date.now()}`;
     const newOverlay = {
       id: newId,
@@ -850,6 +1019,7 @@ export default function App() {
   };
 
   const handleDeleteOverlay = (id) => {
+    commitPendingHistory();
     setOverlays(prev => prev.filter(o => o.id !== id));
     if (selectedOverlayId === id) {
       setSelectedOverlayId(null);
@@ -1015,6 +1185,7 @@ export default function App() {
 
   // Trigger AI Pipeline
   const handleTriggerAI = async () => {
+    commitPendingHistory();
     if (!apiKey) {
       alert('Please configure and save your API Key in settings first!');
       setShowConfig(true);
@@ -1101,6 +1272,7 @@ export default function App() {
   };
 
   const handleAddScene = (template = 'title-card') => {
+    commitPendingHistory();
     const scene = createScene({ title: 'New Scene', template });
     setProject((prev) => ({
       ...prev,
@@ -1111,10 +1283,26 @@ export default function App() {
   };
 
   const handleMoveScene = (sceneId, direction) => {
+    commitPendingHistory();
     const idx = project.scenes.findIndex((s) => s.id === sceneId);
     if (idx < 0) return;
     const to = direction === 'up' ? idx - 1 : idx + 1;
     setProject((prev) => reorderScenes(prev, idx, to));
+  };
+
+  const handleDuplicateScene = (sceneId) => {
+    commitPendingHistory();
+    setProject((p) => duplicateScene(p, sceneId));
+  };
+
+  const handleRemoveScene = (sceneId) => {
+    commitPendingHistory();
+    setProject((p) => removeScene(p, sceneId));
+  };
+
+  const handleSelectAspectRatio = (ratio) => {
+    commitPendingHistory();
+    setAspectRatio(ratio);
   };
 
   // Offline CSV upload handler
@@ -1131,6 +1319,7 @@ export default function App() {
 
   // Map CSV data to tracks offline
   const handleLoadCSVTimeline = () => {
+    commitPendingHistory();
     if (!csvContent) {
       alert('Please paste CSV content or upload a file first.');
       return;
@@ -1289,11 +1478,47 @@ export default function App() {
             API Keys
           </button>
 
+          {/* Undo / Redo Buttons */}
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <button
+              type="button"
+              className="control-btn"
+              onClick={handleUndo}
+              disabled={past.length === 0}
+              title="Undo (Ctrl+Z)"
+              style={{ 
+                width: '28px', 
+                height: '28px', 
+                borderRadius: '6px',
+                opacity: past.length === 0 ? 0.4 : 1,
+                cursor: past.length === 0 ? 'not-allowed' : 'pointer'
+              }}
+            >
+              <Undo size={14} />
+            </button>
+            <button
+              type="button"
+              className="control-btn"
+              onClick={handleRedo}
+              disabled={future.length === 0}
+              title="Redo (Ctrl+Y)"
+              style={{ 
+                width: '28px', 
+                height: '28px', 
+                borderRadius: '6px',
+                opacity: future.length === 0 ? 0.4 : 1,
+                cursor: future.length === 0 ? 'not-allowed' : 'pointer'
+              }}
+            >
+              <Redo size={14} />
+            </button>
+          </div>
+
           {/* Aspect Ratio Selector */}
           <div style={{ display: 'flex', background: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border-color))', borderRadius: '8px', padding: '2px' }}>
             <button 
               className={`control-btn ${aspectRatio === 'landscape' ? 'active-play' : ''}`} 
-              onClick={() => setAspectRatio('landscape')}
+              onClick={() => handleSelectAspectRatio('landscape')}
               title="Landscape 16:9"
               style={{ width: '28px', height: '28px', borderRadius: '6px' }}
             >
@@ -1301,7 +1526,7 @@ export default function App() {
             </button>
             <button 
               className={`control-btn ${aspectRatio === 'portrait' ? 'active-play' : ''}`} 
-              onClick={() => setAspectRatio('portrait')}
+              onClick={() => handleSelectAspectRatio('portrait')}
               title="Portrait 9:16 (Reels/Shorts)"
               style={{ width: '28px', height: '28px', borderRadius: '6px' }}
             >
@@ -1309,7 +1534,7 @@ export default function App() {
             </button>
             <button 
               className={`control-btn ${aspectRatio === 'square' ? 'active-play' : ''}`} 
-              onClick={() => setAspectRatio('square')}
+              onClick={() => handleSelectAspectRatio('square')}
               title="Square 1:1"
               style={{ width: '28px', height: '28px', borderRadius: '6px' }}
             >
@@ -1762,10 +1987,10 @@ export default function App() {
                           <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); handleMoveScene(scene.id, 'down'); }}>
                             <ArrowDown size={12} />
                           </button>
-                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); setProject((p) => duplicateScene(p, scene.id)); }}>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); handleDuplicateScene(scene.id); }}>
                             <Copy size={12} />
                           </button>
-                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); setProject((p) => removeScene(p, scene.id)); }}>
+                          <button className="control-btn" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); handleRemoveScene(scene.id); }}>
                             <Trash2 size={12} />
                           </button>
                         </div>
