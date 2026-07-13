@@ -68,6 +68,8 @@ import {
   trimClipLeft,
   trimClipRight,
   updateClipTrim,
+  moveClip,
+  splitClipAt,
   getClipsEnd,
   VIDEO_DRAG_MIME
 } from './models/videoClip';
@@ -704,6 +706,42 @@ export default function App() {
     );
   };
 
+  const handleMoveVideoClip = (clipId, newTimelineStart, origin) => {
+    setVideoClips((prev) =>
+      prev.map((c) => {
+        if (c.id !== clipId) return c;
+        const base = origin || c;
+        return moveClip(base, newTimelineStart);
+      })
+    );
+  };
+
+  const handleSplitVideoClip = (atTime = currentTime) => {
+    const t = Number(atTime);
+    const clips = videoClipsRef.current;
+    const target =
+      (selectedVideoClipId && clips.find((c) => c.id === selectedVideoClipId)) ||
+      findActiveClip(clips, t);
+    if (!target) return;
+    const parts = splitClipAt(target, t);
+    if (!parts) return;
+    const [left, right] = parts;
+    setVideoClips((prev) => {
+      const next = [];
+      for (const c of prev) {
+        if (c.id === target.id) {
+          next.push(left, right);
+        } else {
+          next.push(c);
+        }
+      }
+      return next;
+    });
+    setSelectedVideoClipId(right.id);
+    setSelectedOverlayId(null);
+    setActiveRightTab('properties');
+  };
+
   const handleDuplicateVideoClip = () => {
     if (!selectedVideoClip) return;
     const copy = duplicateClip(selectedVideoClip);
@@ -743,11 +781,20 @@ export default function App() {
     setActiveRightTab('properties');
   };
 
-  // Keyboard: Delete clip, D = duplicate
+  // Keyboard: Delete clip, D = duplicate, S = split at playhead
   useEffect(() => {
     const onKey = (e) => {
       const tag = e.target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+
+      if (e.key === 's' || e.key === 'S') {
+        const clips = videoClipsRef.current;
+        if (!clips.length) return;
+        e.preventDefault();
+        handleSplitVideoClip(currentTimeRef.current);
+        return;
+      }
+
       if (!selectedVideoClipId) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -2010,6 +2057,15 @@ export default function App() {
             showHyperFramesPreview={showHyperFramesPreview}
             onPlay={togglePlay}
             onReset={handleReset}
+            onSplit={() => handleSplitVideoClip(currentTime)}
+            canSplit={(() => {
+              const clip =
+                (selectedVideoClipId && videoClips.find((c) => c.id === selectedVideoClipId)) ||
+                findActiveClip(videoClips, currentTime);
+              if (!clip) return false;
+              const local = currentTime - clip.timelineStart;
+              return local >= 0.2 && local <= clip.duration - 0.2;
+            })()}
           />
 
           <TimelinePanel
@@ -2037,6 +2093,8 @@ export default function App() {
             onCropEnd={setCropEnd}
             onDropVideo={handleDropVideo}
             onTrimVideoClip={handleTrimVideoClip}
+            onMoveVideoClip={handleMoveVideoClip}
+            onSplitVideoClip={handleSplitVideoClip}
           />
         </main>
 
@@ -2139,7 +2197,7 @@ export default function App() {
                       <div>Duration on timeline: <strong style={{ color: 'hsl(var(--text-primary))' }}>{selectedVideoClip.duration.toFixed(2)}s</strong></div>
                       <div>Source length: {selectedVideoClip.sourceDuration.toFixed(2)}s</div>
                       <p style={{ marginTop: '8px', fontStyle: 'italic' }}>
-                        Drag the clip edges on the Video track to trim, or edit Source In/Out here.
+                        Drag the clip body to move · edges to trim · Split (S) to cut at playhead.
                       </p>
                     </div>
                   </div>

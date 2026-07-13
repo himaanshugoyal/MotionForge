@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Layers, SkipBack, Play, Pause, RotateCcw } from 'lucide-react';
+import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
-import { getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
+import { findActiveClip, getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
 export function formatTimecode(seconds = 0) {
   const s = Math.max(0, Number(seconds) || 0);
@@ -14,12 +14,12 @@ export function formatTimecode(seconds = 0) {
 
 function buildRulerTicks(duration) {
   const d = Math.max(duration || 1, 0.1);
-  const step = d <= 10 ? 0.5 : d <= 30 ? 1 : 2;
+  const step = d <= 10 ? 0.5 : d <= 30 ? 1 : d <= 90 ? 2 : 5;
   const ticks = [];
   for (let t = 0; t <= d + 0.001; t += step) {
     ticks.push({
       time: Math.min(t, d),
-      major: t === 0 || Math.abs(t % 1) < 0.001 || step >= 1
+      major: t === 0 || Math.abs(t % (step >= 2 ? step : 1)) < 0.001 || step >= 2
     });
   }
   if (ticks[ticks.length - 1]?.time < d - 0.05) {
@@ -28,8 +28,18 @@ function buildRulerTicks(duration) {
   return ticks;
 }
 
+function formatRulerLabel(time) {
+  if (time >= 60) {
+    const m = Math.floor(time / 60);
+    const s = Math.floor(time % 60);
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  return time % 1 === 0 ? `${time}s` : time.toFixed(1);
+}
+
 /**
  * Professional timeline with Video (V1) track + scenes + overlays.
+ * Supports drop, trim edges, body-drag move, and split at playhead.
  */
 export default function TimelinePanel({
   videoDuration,
@@ -49,11 +59,14 @@ export default function TimelinePanel({
   onCropStart,
   onCropEnd,
   onDropVideo,
-  onTrimVideoClip
+  onTrimVideoClip,
+  onMoveVideoClip,
+  onSplitVideoClip
 }) {
   const videoTrackRef = useRef(null);
   const [dragOverVideo, setDragOverVideo] = useState(false);
-  const trimDragRef = useRef(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const interactionRef = useRef(null);
 
   const duration = Math.max(
     videoDuration || 0,
@@ -64,6 +77,15 @@ export default function TimelinePanel({
   );
   const ticks = useMemo(() => buildRulerTicks(duration), [duration]);
   const playheadPct = Math.min(100, Math.max(0, (currentTime / duration) * 100));
+
+  const canSplit = useMemo(() => {
+    const clip =
+      (selectedVideoClipId && videoClips.find((c) => c.id === selectedVideoClipId)) ||
+      findActiveClip(videoClips, currentTime);
+    if (!clip) return false;
+    const local = currentTime - clip.timelineStart;
+    return local >= 0.2 && local <= clip.duration - 0.2;
+  }, [videoClips, selectedVideoClipId, currentTime]);
 
   const sceneBlocks = useMemo(() => {
     let offset = 0;
@@ -93,6 +115,12 @@ export default function TimelinePanel({
     }
   };
 
+  const pxPerSec = () => {
+    const el = videoTrackRef.current;
+    if (!el) return 1;
+    return el.getBoundingClientRect().width / duration;
+  };
+
   const timeFromClientX = (clientX) => {
     const el = videoTrackRef.current;
     if (!el) return 0;
@@ -101,13 +129,54 @@ export default function TimelinePanel({
     return pct * duration;
   };
 
+  const snapTime = (t) => {
+    if (!snapEnabled) return Math.max(0, t);
+    const points = [0, cropStart, cropEnd, currentTime];
+    videoClips.forEach((c) => {
+      points.push(c.timelineStart, c.timelineStart + c.duration);
+    });
+    const threshold = 0.35;
+    let best = t;
+    let bestDist = threshold;
+    for (const p of points) {
+      const d = Math.abs(t - p);
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    return Math.max(0, best);
+  };
+
   const handleVideoDrop = (e) => {
     e.preventDefault();
     setDragOverVideo(false);
     const payload = parseDropPayload(e);
     if (!payload?.url) return;
-    const timelineStart = timeFromClientX(e.clientX);
+    const timelineStart = snapTime(timeFromClientX(e.clientX));
     onDropVideo?.(payload, timelineStart);
+  };
+
+  const endInteraction = () => {
+    interactionRef.current = null;
+    window.removeEventListener('pointermove', onInteractionMove);
+    window.removeEventListener('pointerup', endInteraction);
+  };
+
+  const onInteractionMove = (ev) => {
+    const state = interactionRef.current;
+    if (!state) return;
+    const delta = (ev.clientX - state.startX) / pxPerSec();
+
+    if (state.mode === 'trim') {
+      onTrimVideoClip?.(state.clipId, state.edge, delta, state.origin);
+      return;
+    }
+
+    if (state.mode === 'move') {
+      const nextStart = snapTime(state.origin.timelineStart + delta);
+      onMoveVideoClip?.(state.clipId, nextStart, state.origin);
+    }
   };
 
   const startTrim = (e, clipId, edge) => {
@@ -115,30 +184,38 @@ export default function TimelinePanel({
     e.stopPropagation();
     const clip = videoClips.find((c) => c.id === clipId);
     if (!clip || !onTrimVideoClip) return;
-    trimDragRef.current = {
+    interactionRef.current = {
+      mode: 'trim',
       clipId,
       edge,
       startX: e.clientX,
       origin: { ...clip }
     };
     onSelectVideoClip?.(clipId);
+    window.addEventListener('pointermove', onInteractionMove);
+    window.addEventListener('pointerup', endInteraction);
+  };
 
-    const onMove = (ev) => {
-      const state = trimDragRef.current;
-      if (!state) return;
-      const el = videoTrackRef.current;
-      if (!el) return;
-      const pxPerSec = el.getBoundingClientRect().width / duration;
-      const delta = (ev.clientX - state.startX) / pxPerSec;
-      onTrimVideoClip(state.clipId, state.edge, delta, state.origin);
+  const startMove = (e, clipId) => {
+    if (e.button != null && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const clip = videoClips.find((c) => c.id === clipId);
+    if (!clip || !onMoveVideoClip) return;
+    interactionRef.current = {
+      mode: 'move',
+      clipId,
+      startX: e.clientX,
+      origin: { ...clip }
     };
-    const onUp = () => {
-      trimDragRef.current = null;
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    onSelectVideoClip?.(clipId);
+    window.addEventListener('pointermove', onInteractionMove);
+    window.addEventListener('pointerup', endInteraction);
+  };
+
+  const handleSplit = () => {
+    if (!canSplit) return;
+    onSplitVideoClip?.(currentTime);
   };
 
   const isEmpty =
@@ -153,6 +230,26 @@ export default function TimelinePanel({
             Timeline
           </span>
           <span className="timeline-fit-hint">Fit · {duration.toFixed(1)}s</span>
+          <div className="timeline-tools">
+            <button
+              type="button"
+              className={`tl-tool-btn ${snapEnabled ? 'active' : ''}`}
+              title="Snap to edges"
+              onClick={() => setSnapEnabled((v) => !v)}
+            >
+              <Magnet size={13} />
+            </button>
+            <button
+              type="button"
+              className={`tl-tool-btn split ${canSplit ? '' : 'disabled'}`}
+              title="Split at playhead (S)"
+              disabled={!canSplit}
+              onClick={handleSplit}
+            >
+              <Scissors size={13} />
+              Split
+            </button>
+          </div>
         </div>
         <div className="timeline-trim-fields">
           <span className="timeline-trim-label">In</span>
@@ -183,7 +280,10 @@ export default function TimelinePanel({
           <div className="tl-gutter">
             <div className="tl-gutter-ruler-spacer" />
             <div className="tl-gutter-master-spacer" title="Master trim">Master</div>
-            <div className={`tl-gutter-label ${selectedVideoClipId ? 'active' : ''}`}>Video</div>
+            <div className={`tl-gutter-label video-track ${selectedVideoClipId ? 'active' : ''}`}>
+              <Video size={11} />
+              <span>Video 1</span>
+            </div>
             {sceneBlocks.length > 0 && (
               <div className="tl-gutter-label">Scenes</div>
             )}
@@ -203,6 +303,15 @@ export default function TimelinePanel({
 
           <div className="tl-tracks">
             <div className="tl-playhead" style={{ left: `${playheadPct}%` }}>
+              <button
+                type="button"
+                className={`tl-playhead-cut ${canSplit ? 'ready' : ''}`}
+                title={canSplit ? 'Split clip at playhead' : 'Move playhead onto a clip to split'}
+                disabled={!canSplit}
+                onClick={handleSplit}
+              >
+                <Scissors size={11} />
+              </button>
               <div className="tl-playhead-head" />
             </div>
 
@@ -214,9 +323,7 @@ export default function TimelinePanel({
                   style={{ left: `${(tick.time / duration) * 100}%` }}
                 >
                   {tick.major && (
-                    <span className="tl-ruler-label">
-                      {tick.time % 1 === 0 ? `${tick.time}s` : tick.time.toFixed(1)}
-                    </span>
+                    <span className="tl-ruler-label">{formatRulerLabel(tick.time)}</span>
                   )}
                 </div>
               ))}
@@ -244,7 +351,7 @@ export default function TimelinePanel({
               />
             </div>
 
-            {/* Video V1 track — drop target */}
+            {/* Video V1 track — drop / move / trim */}
             <div
               ref={videoTrackRef}
               className={`tl-track-row tl-video-track ${dragOverVideo ? 'drag-over' : ''}`}
@@ -257,23 +364,20 @@ export default function TimelinePanel({
               onDrop={handleVideoDrop}
             >
               {videoClips.length === 0 && (
-                <div className="tl-drop-hint">Drag videos here · or use Add to timeline</div>
+                <div className="tl-drop-hint">Drag videos here · trim edges · drag body to move · Split to cut</div>
               )}
               {videoClips.map((clip) => (
                 <div
                   key={clip.id}
                   role="button"
                   tabIndex={0}
-                  className={`tl-clip video ${selectedVideoClipId === clip.id ? 'selected' : ''}`}
+                  className={`tl-clip video pro ${selectedVideoClipId === clip.id ? 'selected' : ''}`}
                   style={{
                     left: `${(clip.timelineStart / duration) * 100}%`,
                     width: `${(clip.duration / duration) * 100}%`
                   }}
-                  title={`${clip.name} (${clip.duration.toFixed(1)}s)`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelectVideoClip?.(clip.id);
-                  }}
+                  title={`${clip.name} · drag to move · edges to trim`}
+                  onPointerDown={(e) => startMove(e, clip.id)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') onSelectVideoClip?.(clip.id);
                   }}
@@ -283,7 +387,14 @@ export default function TimelinePanel({
                     onPointerDown={(e) => startTrim(e, clip.id, 'left')}
                     title="Trim in"
                   />
-                  <span className="tl-clip-label">{clip.name}</span>
+                  <div className="tl-clip-body">
+                    <div className="tl-clip-header">
+                      <Video size={10} />
+                      <span className="tl-clip-label">{clip.name}</span>
+                    </div>
+                    <div className="tl-clip-filmstrip" aria-hidden />
+                    <div className="tl-clip-wave" aria-hidden />
+                  </div>
                   <span
                     className="tl-clip-edge right"
                     onPointerDown={(e) => startTrim(e, clip.id, 'right')}
@@ -342,7 +453,9 @@ export function TransportDock({
   duration,
   showHyperFramesPreview,
   onPlay,
-  onReset
+  onReset,
+  onSplit,
+  canSplit
 }) {
   const total = Math.max(duration || 0, 0.1);
   return (
@@ -361,6 +474,15 @@ export function TransportDock({
         </button>
         <button type="button" className="control-btn" onClick={onReset} title="Reset">
           <RotateCcw size={14} />
+        </button>
+        <button
+          type="button"
+          className={`control-btn ${canSplit ? '' : 'is-disabled'}`}
+          onClick={onSplit}
+          disabled={!canSplit}
+          title="Split clip at playhead (S)"
+        >
+          <Scissors size={14} />
         </button>
       </div>
       <div className="transport-timecode">

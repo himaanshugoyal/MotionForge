@@ -99,6 +99,42 @@ export function updateClipTrim(clip, { sourceIn, sourceOut }) {
   });
 }
 
+/** Slide clip on the timeline without changing source trim. */
+export function moveClip(clip, newTimelineStart) {
+  if (!clip) return null;
+  return createVideoClip({
+    ...clip,
+    timelineStart: Math.max(0, Number(newTimelineStart) || 0)
+  });
+}
+
+/**
+ * Split a clip at an absolute timeline time.
+ * Returns [left, right] or null if playhead is not inside the clip (with margin).
+ */
+export function splitClipAt(clip, timelineTime) {
+  if (!clip) return null;
+  const local = timelineTime - clip.timelineStart;
+  if (local < MIN_CLIP_DURATION || local > clip.duration - MIN_CLIP_DURATION) {
+    return null;
+  }
+  const splitSource = clip.sourceIn + local;
+  const left = createVideoClip({
+    ...clip,
+    id: clip.id,
+    sourceOut: splitSource
+  });
+  const right = createVideoClip({
+    ...clip,
+    id: undefined,
+    name: clip.name,
+    timelineStart: timelineTime,
+    sourceIn: splitSource,
+    sourceOut: clip.sourceOut
+  });
+  return [left, right];
+}
+
 export { MIN_CLIP_DURATION };
 
 export const VIDEO_DRAG_MIME = 'application/x-motionforge-video';
