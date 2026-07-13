@@ -86,7 +86,7 @@ export function buildCompositionHtml(project, options = {}) {
        data-duration="${duration.toFixed(2)}"
        data-width="${width}"
        data-height="${height}">
-    ${bgVideo ? `<video id="video-bg" class="clip" data-start="0" data-duration="${duration.toFixed(2)}" data-track-index="0" src="${escapeAttr(absolutizeUrl(bgVideo, baseUrl))}" muted playsinline></video>` : ''}
+    ${bgVideo ? `<video id="video-bg" class="clip" data-start="0" data-duration="${duration.toFixed(2)}" data-track-index="0" src="${escapeAttr(absolutizeUrl(bgVideo, baseUrl))}" playsinline></video>` : ''}
     ${scenesHtml}
     ${extraOverlayHtml}
   </div>
@@ -133,7 +133,7 @@ export function buildCompositionHtmlFromOverlays({
 </head>
 <body>
   <div id="root" data-composition-id="preview" data-start="0" data-duration="${Number(videoDuration).toFixed(2)}" data-width="${width}" data-height="${height}" style="position:relative;width:${width}px;height:${height}px;">
-    ${videoUrl ? `<video id="video-bg" class="clip" data-start="0" data-duration="${Number(videoDuration).toFixed(2)}" data-track-index="0" src="${escapeAttr(absolutizeUrl(videoUrl, origin))}" muted playsinline></video>` : ''}
+    ${videoUrl ? `<video id="video-bg" class="clip" data-start="0" data-duration="${Number(videoDuration).toFixed(2)}" data-track-index="0" src="${escapeAttr(absolutizeUrl(videoUrl, origin))}" playsinline></video>` : ''}
     ${overlaysHTML}
   </div>
   <script>

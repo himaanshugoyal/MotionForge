@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet } from 'lucide-react';
+import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2 } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
 import { findActiveClip, getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
@@ -10,6 +10,72 @@ export function formatTimecode(seconds = 0) {
   const whole = Math.floor(rem);
   const frames = Math.floor((rem - whole) * 30);
   return `${String(m).padStart(2, '0')}:${String(whole).padStart(2, '0')}.${String(frames).padStart(2, '0')}`;
+}
+
+function renderClipWaveform(clip) {
+  if (!clip.peaks) {
+    return <div className="tl-clip-wave" aria-hidden />;
+  }
+
+  if (clip.peaks === 'loading') {
+    return (
+      <div 
+        className="tl-clip-wave loading-wave" 
+        aria-hidden 
+        style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          height: '10px', 
+          fontSize: '7px', 
+          color: 'hsl(var(--accent-cyan))', 
+          fontWeight: 'bold',
+          background: 'hsl(200 25% 12% / 0.8)',
+          letterSpacing: '0.5px'
+        }}
+      >
+        <span>ANALYZING AUDIO...</span>
+      </div>
+    );
+  }
+
+  if (!Array.isArray(clip.peaks) || clip.peaks.length === 0) {
+    return <div className="tl-clip-wave" aria-hidden />;
+  }
+
+  const totalPeaks = clip.peaks.length;
+  const startIdx = Math.floor((clip.sourceIn / clip.sourceDuration) * totalPeaks);
+  const endIdx = Math.ceil((clip.sourceOut / clip.sourceDuration) * totalPeaks);
+  const visiblePeaks = clip.peaks.slice(Math.max(0, startIdx), Math.min(totalPeaks, endIdx));
+
+  if (visiblePeaks.length === 0) {
+    return <div className="tl-clip-wave" aria-hidden />;
+  }
+
+  const width = 1000;
+  const height = 100;
+  const centerY = height / 2;
+  const step = width / (visiblePeaks.length - 1 || 1);
+  
+  let topPoints = [];
+  let bottomPoints = [];
+  
+  visiblePeaks.forEach((p, idx) => {
+    const x = idx * step;
+    const amplitude = p * (height / 2 - 2);
+    topPoints.push(`${x},${centerY - amplitude}`);
+    bottomPoints.unshift(`${x},${centerY + amplitude}`);
+  });
+  
+  const d = `M ${topPoints.join(' L ')} L ${bottomPoints.join(' L ')} Z`;
+
+  return (
+    <div className="tl-clip-wave-graph" style={{ height: '10px', borderTop: '1px solid hsl(0 0% 0% / 0.25)', overflow: 'hidden', background: 'hsl(200 25% 12%)' }}>
+      <svg viewBox="0 0 1000 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%', display: 'block' }}>
+        <path d={d} fill="hsl(145 70% 45% / 0.75)" />
+      </svg>
+    </div>
+  );
 }
 
 function buildRulerTicks(duration) {
@@ -61,7 +127,8 @@ export default function TimelinePanel({
   onDropVideo,
   onTrimVideoClip,
   onMoveVideoClip,
-  onSplitVideoClip
+  onSplitVideoClip,
+  onAutoTrimSilence
 }) {
   const videoTrackRef = useRef(null);
   const [dragOverVideo, setDragOverVideo] = useState(false);
@@ -249,6 +316,16 @@ export default function TimelinePanel({
               <Scissors size={13} />
               Split
             </button>
+            <button
+              type="button"
+              className={`tl-tool-btn auto-trim ${selectedVideoClipId ? '' : 'disabled'}`}
+              title="Auto Trim Silences (Magic)"
+              disabled={!selectedVideoClipId}
+              onClick={() => onAutoTrimSilence && onAutoTrimSilence()}
+            >
+              <Wand2 size={13} />
+              Auto Trim
+            </button>
           </div>
         </div>
         <div className="timeline-trim-fields">
@@ -393,7 +470,7 @@ export default function TimelinePanel({
                       <span className="tl-clip-label">{clip.name}</span>
                     </div>
                     <div className="tl-clip-filmstrip" aria-hidden />
-                    <div className="tl-clip-wave" aria-hidden />
+                    {renderClipWaveform(clip)}
                   </div>
                   <span
                     className="tl-clip-edge right"

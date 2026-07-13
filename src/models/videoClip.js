@@ -25,7 +25,8 @@ export function createVideoClip(partial = {}) {
     duration,
     sourceIn,
     sourceOut,
-    sourceDuration
+    sourceDuration,
+    peaks: partial.peaks || null
   };
 }
 

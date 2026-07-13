@@ -78,6 +78,7 @@ import {
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
+import { fetchAndDecodePeaks, detectAudioSegments } from './utils/audioWaveform';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -161,7 +162,9 @@ export default function App() {
   
   // API Configurations State
   const [apiProvider, setApiProvider] = useState('gemini');
-  const [apiKey, setApiKey] = useState('');
+  const [apiKey, setApiKey] = useState(() => {
+    return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('mf_key') || '';
+  });
   const [apiModel, setApiModel] = useState('gemini-1.5-flash');
   const [showConfig, setShowConfig] = useState(false);
 
@@ -378,6 +381,8 @@ export default function App() {
   const pdfInputRef = useRef(null);
   const csvInputRef = useRef(null);
   const screenshotInputRef = useRef(null);
+  const loadingUrlsRef = useRef(new Set());
+  const isMountedRef = useRef(true);
 
   // Selected Overlay / Video clip details
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
@@ -392,9 +397,18 @@ export default function App() {
     0.1
   );
 
-  // Sync API model dropdown when provider changes
+  // Sync API model dropdown and API key when provider changes
   useEffect(() => {
     setApiModel(MODEL_OPTIONS[apiProvider][0]);
+    const envKey = 
+      apiProvider === 'gemini' ? import.meta.env.VITE_GEMINI_API_KEY :
+      apiProvider === 'openai' ? import.meta.env.VITE_OPENAI_API_KEY :
+      apiProvider === 'claude' ? import.meta.env.VITE_CLAUDE_API_KEY : '';
+    if (envKey) {
+      setApiKey(envKey);
+    } else {
+      setApiKey(localStorage.getItem('mf_key') || '');
+    }
   }, [apiProvider]);
 
   // Load API config from localStorage
@@ -403,8 +417,18 @@ export default function App() {
     const savedKey = localStorage.getItem('mf_key');
     const savedModel = localStorage.getItem('mf_model');
     if (savedProvider) setApiProvider(savedProvider);
-    if (savedKey) setApiKey(savedKey);
     if (savedModel) setApiModel(savedModel);
+
+    const provider = savedProvider || 'gemini';
+    const envKey = 
+      provider === 'gemini' ? import.meta.env.VITE_GEMINI_API_KEY :
+      provider === 'openai' ? import.meta.env.VITE_OPENAI_API_KEY :
+      provider === 'claude' ? import.meta.env.VITE_CLAUDE_API_KEY : '';
+    if (envKey) {
+      setApiKey(envKey);
+    } else if (savedKey) {
+      setApiKey(savedKey);
+    }
   }, []);
 
   // Probe render API health
@@ -413,6 +437,50 @@ export default function App() {
       .then(() => setServerOnline(true))
       .catch(() => setServerOnline(false));
   }, []);
+
+  // Mount state tracking
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  // Load audio peaks/waveforms for video clips dynamically
+  useEffect(() => {
+    const loadWaveforms = async () => {
+      const missingClips = videoClips.filter(
+        (c) => c.peaks === null && c.url && !loadingUrlsRef.current.has(c.id)
+      );
+      if (missingClips.length === 0) return;
+
+      for (const clip of missingClips) {
+        loadingUrlsRef.current.add(clip.id);
+
+        // Set intermediate loading state
+        setVideoClips((prev) =>
+          prev.map((c) => (c.id === clip.id ? { ...c, peaks: 'loading' } : c))
+        );
+
+        fetchAndDecodePeaks(clip.url, 100)
+          .then((peaks) => {
+            if (!isMountedRef.current) return;
+            loadingUrlsRef.current.delete(clip.id);
+            setVideoClips((prev) =>
+              prev.map((c) => (c.id === clip.id ? { ...c, peaks: peaks || [] } : c))
+            );
+          })
+          .catch((err) => {
+            if (!isMountedRef.current) return;
+            loadingUrlsRef.current.delete(clip.id);
+            setVideoClips((prev) =>
+              prev.map((c) => (c.id === clip.id ? { ...c, peaks: [] } : c))
+            );
+          });
+      }
+    };
+    loadWaveforms();
+  }, [videoClips]);
 
   // Keep selected scene in sync
   useEffect(() => {
@@ -866,6 +934,74 @@ export default function App() {
         return moveClip(base, newTimelineStart);
       })
     );
+  };
+
+  const handleAutoTrimSilence = async () => {
+    if (!selectedVideoClipId) return;
+    const clip = videoClips.find(c => c.id === selectedVideoClipId);
+    if (!clip || !clip.url) return;
+    
+    commitPendingHistory();
+    setAiLoading(true);
+    
+    try {
+      const segments = await detectAudioSegments(clip.url, 0.03, 0.5, 0.2);
+      if (!segments || segments.length === 0) {
+        alert('No distinct silent segments found or audio could not be analyzed.');
+        return;
+      }
+      
+      const validSegments = segments
+        .filter(s => s.start < clip.sourceOut && s.end > clip.sourceIn)
+        .map(s => ({
+          start: Math.max(s.start, clip.sourceIn),
+          end: Math.min(s.end, clip.sourceOut)
+        }));
+        
+      if (validSegments.length === 0) {
+        alert('No valid audio segments within the current clip trim range.');
+        return;
+      }
+      
+      let currentTimelineOffset = clip.timelineStart;
+      const newClips = validSegments.map(seg => {
+        const duration = seg.end - seg.start;
+        const newClip = createVideoClip({
+          ...clip,
+          id: undefined,
+          sourceIn: seg.start,
+          sourceOut: seg.end,
+          timelineStart: currentTimelineOffset
+        });
+        currentTimelineOffset += duration;
+        return newClip;
+      });
+      
+      const newTotalDuration = currentTimelineOffset - clip.timelineStart;
+      const shiftDelta = clip.duration - newTotalDuration;
+      
+      setVideoClips(prev => {
+        const next = [];
+        for (const c of prev) {
+          if (c.id === clip.id) {
+            next.push(...newClips);
+          } else if (c.timelineStart >= clip.timelineStart + clip.duration - 0.01) {
+            next.push({ ...c, timelineStart: Math.max(0, c.timelineStart - shiftDelta) });
+          } else {
+            next.push(c);
+          }
+        }
+        return next;
+      });
+      
+      setSelectedVideoClipId(newClips[0].id);
+      
+    } catch (err) {
+      console.error(err);
+      alert('Failed to auto-trim silences: ' + err.message);
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const handleSplitVideoClip = (atTime = currentTime) => {
@@ -2195,7 +2331,6 @@ export default function App() {
                   src={videoUrl}
                   className="main-video"
                   playsInline
-                  muted
                   preload="metadata"
                   {...(videoUrl.startsWith('http') ? { crossOrigin: 'anonymous' } : {})}
                   style={showHyperFramesPreview ? { position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' } : undefined}
@@ -2320,6 +2455,7 @@ export default function App() {
             onTrimVideoClip={handleTrimVideoClip}
             onMoveVideoClip={handleMoveVideoClip}
             onSplitVideoClip={handleSplitVideoClip}
+            onAutoTrimSilence={handleAutoTrimSilence}
           />
         </main>
 
