@@ -377,6 +377,7 @@ export default function App() {
   const [hfPreviewUrl, setHfPreviewUrl] = useState(null);
 
   // Refs
+  const hfPlayerRef = useRef(null);
   const videoRef = useRef(null);
   const playerContainerRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -648,6 +649,19 @@ export default function App() {
 
   // Handle Play/Pause
   const togglePlay = () => {
+    if (showHyperFramesPreview) {
+      if (hfPlayerRef.current) {
+        if (isPlaying) {
+          hfPlayerRef.current.pause();
+          setIsPlaying(false);
+        } else {
+          hfPlayerRef.current.play();
+          setIsPlaying(true);
+        }
+      }
+      return;
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -692,6 +706,16 @@ export default function App() {
   };
 
   const handleReset = () => {
+    if (showHyperFramesPreview) {
+      if (hfPlayerRef.current) {
+        hfPlayerRef.current.pause();
+        try { hfPlayerRef.current.currentTime = 0; } catch (e) {}
+      }
+      setIsPlaying(false);
+      setCurrentTime(0);
+      return;
+    }
+
     const video = videoRef.current;
     if (videoClips.length > 0) {
       const first = videoClips.slice().sort((a, b) => a.timelineStart - b.timelineStart)[0];
@@ -1336,7 +1360,10 @@ export default function App() {
         promptText: aiPrompt,
         pdfText,
         webpageText: scrapedDataText || rawHtmlPaste,
-        contentBrief
+        contentBrief,
+        imageBase64,
+        imageMimeType,
+        fileBase64: pdfBase64
       });
       if (enhanced) {
         setAiPrompt(enhanced);
@@ -2385,6 +2412,7 @@ export default function App() {
                 />
                 {showHyperFramesPreview ? (
                   <hyperframes-player
+                    ref={hfPlayerRef}
                     src={hfPreviewUrl}
                     controls
                     style={{ width: '100%', height: '100%' }}

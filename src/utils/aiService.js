@@ -266,8 +266,18 @@ ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as bina
   throw new Error('Unsupported API provider selected.');
 }
 
-const ENHANCE_PROMPT_SYSTEM = `You are an expert AI video prompt engineer. Your job is to take a basic user prompt and any provided context (like website text or document summaries), and rewrite the prompt into a highly descriptive, vivid, and optimized prompt for an AI video generation agent.
-Return ONLY the raw prompt text string. Do not wrap in quotes or markdown. Make it compelling, structured, and focused on visual storytelling, motion design, and key messaging.`;
+const ENHANCE_PROMPT_SYSTEM = `You are an expert AI video prompt engineer for MotionForge.
+Your job is to rewrite the user's basic prompt into a highly descriptive, vivid, and optimized instruction set for an AI video generation agent.
+
+CRITICAL RULES:
+1. Extract EXACT copy (brand names, exact bullet points, exact colors) from the provided context (PDF/website). Do not hallucinate generic tech copy.
+2. If the user mentions a specific vibe (e.g. "ethnic wear", "festive"), enforce that aesthetic throughout the prompt and IGNORE conflicting default UI/tech themes.
+3. Keep the prompt structured and focused on:
+   - Brand Identity & Tone
+   - Key Selling Points (extracted exactly from context)
+   - Visual Style (colors, fonts, pacing)
+4. Do not include meta-commentary like "Here is your enhanced prompt:".
+5. Return ONLY the raw, enhanced prompt text string. No quotes, no markdown blocks.`;
 
 export async function enhanceAIPrompt({
   provider,
@@ -277,6 +287,9 @@ export async function enhanceAIPrompt({
   pdfText,
   webpageText,
   contentBrief,
+  imageBase64,
+  imageMimeType = 'image/png',
+  fileBase64,
   proxyUrl = ''
 }) {
   const briefBlock = contentBrief
@@ -287,13 +300,24 @@ export async function enhanceAIPrompt({
 ${webpageText ? `\n\nCrawled Website Data:\n${webpageText}` : ''}
 ${pdfText ? `\n\nExtracted PDF Text:\n${pdfText}` : ''}
 ${briefBlock}
+${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as binary]` : ''}
+${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as binary — extract exact copy and colors from it]` : ''}
 
 Rewrite or auto-suggest a professional motion graphics video prompt based on this.`;
 
   if (provider === 'gemini') {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const parts = [{ text: `${ENHANCE_PROMPT_SYSTEM}\n\n${userQuery}` }];
+
+    if (fileBase64) {
+      parts.unshift({ inlineData: { mimeType: 'application/pdf', data: fileBase64 } });
+    }
+    if (imageBase64) {
+      parts.unshift({ inlineData: { mimeType: imageMimeType, data: imageBase64 } });
+    }
+
     const payload = {
-      contents: [{ role: 'user', parts: [{ text: `${ENHANCE_PROMPT_SYSTEM}\n\n${userQuery}` }] }]
+      contents: [{ role: 'user', parts }]
     };
 
     const res = await fetch(url, {
