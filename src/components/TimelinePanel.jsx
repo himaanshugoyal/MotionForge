@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2 } from 'lucide-react';
+import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2, Link } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
 import { findActiveClip, getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
@@ -129,7 +129,9 @@ export default function TimelinePanel({
   onMoveVideoClip,
   onSplitVideoClip,
   onAutoTrimSilence,
-  onAutoGenerateGraphics
+  onAutoGenerateGraphics,
+  isRippleEnabled,
+  onToggleRipple
 }) {
   const videoTrackRef = useRef(null);
   const [dragOverVideo, setDragOverVideo] = useState(false);
@@ -306,6 +308,14 @@ export default function TimelinePanel({
               onClick={() => setSnapEnabled((v) => !v)}
             >
               <Magnet size={13} />
+            </button>
+            <button
+              type="button"
+              className={`tl-tool-btn ${isRippleEnabled ? 'active' : ''}`}
+              title="Ripple Edit (Shift clips when trimming/deleting)"
+              onClick={() => onToggleRipple && onToggleRipple()}
+            >
+              <Link size={13} />
             </button>
             <button
               type="button"

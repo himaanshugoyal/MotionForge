@@ -200,6 +200,7 @@ export default function App() {
   const [uploadedVideos, setUploadedVideos] = useState([]);
   const [videoClips, setVideoClips] = useState([]);
   const [selectedVideoClipId, setSelectedVideoClipId] = useState(null);
+  const [isRippleEnabled, setIsRippleEnabled] = useState(true);
   const activeClipIdRef = useRef(null);
   const videoClipsRef = useRef(videoClips);
   const isPlayingRef = useRef(isPlaying);
@@ -943,13 +944,28 @@ export default function App() {
   };
 
   const handleTrimVideoClip = (clipId, edge, delta, origin) => {
-    setVideoClips((prev) =>
-      prev.map((c) => {
+    setVideoClips((prev) => {
+      let durationDiff = 0;
+      let targetClipStart = 0;
+      
+      const newClips = prev.map((c) => {
         if (c.id !== clipId) return c;
         const base = origin || c;
-        return edge === 'left' ? trimClipLeft(base, delta) : trimClipRight(base, delta);
-      })
-    );
+        const newClip = edge === 'left' ? trimClipLeft(base, delta) : trimClipRight(base, delta);
+        durationDiff = newClip.duration - base.duration;
+        targetClipStart = base.timelineStart;
+        return newClip;
+      });
+
+      if (!isRippleEnabled || durationDiff === 0) return newClips;
+
+      return newClips.map(c => {
+        if (c.id !== clipId && c.timelineStart > targetClipStart) {
+          return { ...c, timelineStart: Math.max(0, c.timelineStart + durationDiff) };
+        }
+        return c;
+      });
+    });
   };
 
   const handleMoveVideoClip = (clipId, newTimelineStart, origin) => {
@@ -1124,7 +1140,23 @@ export default function App() {
   const handleDeleteVideoClip = () => {
     commitPendingHistory();
     if (!selectedVideoClipId) return;
-    setVideoClips((prev) => prev.filter((c) => c.id !== selectedVideoClipId));
+    
+    setVideoClips((prev) => {
+      const clipToDelete = prev.find(c => c.id === selectedVideoClipId);
+      if (!clipToDelete) return prev;
+      
+      const filtered = prev.filter((c) => c.id !== selectedVideoClipId);
+      if (!isRippleEnabled) return filtered;
+      
+      const shiftAmount = clipToDelete.duration;
+      return filtered.map(c => {
+        if (c.timelineStart >= clipToDelete.timelineStart) {
+          return { ...c, timelineStart: Math.max(0, c.timelineStart - shiftAmount) };
+        }
+        return c;
+      });
+    });
+    
     setSelectedVideoClipId(null);
   };
 
@@ -2588,6 +2620,8 @@ export default function App() {
             onSplitVideoClip={handleSplitVideoClip}
             onAutoTrimSilence={handleAutoTrimSilence}
             onAutoGenerateGraphics={handleAutoGenerateGraphics}
+            isRippleEnabled={isRippleEnabled}
+            onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
           />
         </main>
 
