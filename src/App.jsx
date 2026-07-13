@@ -79,6 +79,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
 import { fetchAndDecodePeaks, detectAudioSegments } from './utils/audioWaveform';
+import toast, { Toaster } from 'react-hot-toast';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -505,7 +506,7 @@ export default function App() {
     localStorage.setItem('mf_key', apiKey);
     localStorage.setItem('mf_model', apiModel);
     setShowConfig(false);
-    alert('API key stored securely in your browser!');
+    toast.success('API key stored securely in your browser!');
   };
 
   // Bind video element — map source time → timeline when clips exist
@@ -766,7 +767,7 @@ export default function App() {
     if (!file) return;
 
     if (!file.type.startsWith('video/') && !/\.(mp4|webm|mov|m4v)$/i.test(file.name)) {
-      alert('Please choose a video file (MP4, WebM, or MOV).');
+      toast.error('Please choose a video file (MP4, WebM, or MOV).');
       return;
     }
 
@@ -947,7 +948,7 @@ export default function App() {
     try {
       const segments = await detectAudioSegments(clip.url, 0.03, 0.5, 0.2);
       if (!segments || segments.length === 0) {
-        alert('No distinct silent segments found or audio could not be analyzed.');
+        toast.error('No distinct silent segments found or audio could not be analyzed.');
         return;
       }
       
@@ -959,7 +960,7 @@ export default function App() {
         }));
         
       if (validSegments.length === 0) {
-        alert('No valid audio segments within the current clip trim range.');
+        toast.error('No valid audio segments within the current clip trim range.');
         return;
       }
       
@@ -998,7 +999,7 @@ export default function App() {
       
     } catch (err) {
       console.error(err);
-      alert('Failed to auto-trim silences: ' + err.message);
+      toast.error('Failed to auto-trim silences: ' + err.message);
     } finally {
       setAiLoading(false);
     }
@@ -1204,7 +1205,7 @@ export default function App() {
   // Website Crawling Handler — prefers server HyperFrames capture
   const handleCrawlWebsite = async () => {
     if (!webpageUrl) {
-      alert('Please enter a target website URL first!');
+      toast.error('Please enter a target website URL first!');
       return;
     }
     setIsCrawling(true);
@@ -1223,16 +1224,16 @@ export default function App() {
           setScreenshotAsset(result.brief.assets[0]);
         }
         setServerOnline(true);
-        alert('Website captured via render server. Screenshots + brand tokens ready.');
+        toast.success('Website captured via render server. Screenshots + brand tokens ready.');
       } catch (serverErr) {
         console.warn('Server capture failed, falling back to CORS scrape:', serverErr);
         const resultText = await scrapeWebsite(webpageUrl);
         setScrapedDataText(resultText);
         setContentBrief(null);
-        alert('Website crawled via browser proxy (server capture unavailable).');
+        toast.success('Website crawled via browser proxy (server capture unavailable).');
       }
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setIsCrawling(false);
     }
@@ -1257,7 +1258,7 @@ export default function App() {
         setScreenshotAsset(asset);
         setContentBrief(brief);
         setServerOnline(true);
-        alert('Screenshot uploaded. It will drive ken-burns scenes on generate.');
+        toast.success('Screenshot uploaded. It will drive ken-burns scenes on generate.');
       } catch {
         setScreenshotAsset({
           type: 'screenshot',
@@ -1272,10 +1273,10 @@ export default function App() {
           brand: { colors: ['#0a0a0f', '#67e8f9', '#ffffff'], fonts: ['Outfit'] },
           sourceType: 'screenshot'
         });
-        alert('Screenshot loaded locally (upload API offline).');
+        toast.success('Screenshot loaded locally (upload API offline).');
       }
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message);
     }
   };
 
@@ -1312,7 +1313,7 @@ export default function App() {
           console.log("Successfully extracted text from PDF. Character count:", finalPdfText.length);
         } catch (err) {
           console.error("Failed to parse PDF text:", err);
-          alert("Client-side PDF text extraction failed: " + err.message);
+          toast.error("Client-side PDF text extraction failed: " + err.message);
         }
       };
       bufferReader.readAsArrayBuffer(file);
@@ -1323,7 +1324,7 @@ export default function App() {
   const handleTriggerAI = async () => {
     commitPendingHistory();
     if (!apiKey) {
-      alert('Please configure and save your API Key in settings first!');
+      toast.error('Please configure and save your API Key in settings first!');
       setShowConfig(true);
       return;
     }
@@ -1393,10 +1394,10 @@ export default function App() {
       }
 
       setLeftTab('scenes');
-      alert('AI multi-scene composition ready. Edit scenes, preview HyperFrames, then render MP4.');
+      toast.success('AI multi-scene composition ready. Edit scenes, preview HyperFrames, then render MP4.');
     } catch (err) {
       console.error(err);
-      alert(`AI Generation failed: ${err.message}`);
+      toast.error(`AI Generation failed: ${err.message}`);
     } finally {
       setAiLoading(false);
     }
@@ -1457,12 +1458,12 @@ export default function App() {
   const handleLoadCSVTimeline = () => {
     commitPendingHistory();
     if (!csvContent) {
-      alert('Please paste CSV content or upload a file first.');
+      toast.error('Please paste CSV content or upload a file first.');
       return;
     }
     const rows = parseCSV(csvContent);
     if (rows.length === 0) {
-      alert('No data rows found in CSV.');
+      toast.error('No data rows found in CSV.');
       return;
     }
     const generatedOverlays = mapCSVToTimeline(rows, csvTemplate, videoDuration);
@@ -1470,7 +1471,7 @@ export default function App() {
     if (generatedOverlays.length > 0) {
       setSelectedOverlayId(generatedOverlays[0].id);
     }
-    alert(`Imported ${generatedOverlays.length} timed tracks from CSV!`);
+    toast.success(`Imported ${generatedOverlays.length} timed tracks from CSV!`);
   };
 
   // Boilerplate loader
@@ -1517,7 +1518,7 @@ export default function App() {
       URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Export failed:', error);
-      alert('Video export failed. Make sure your browser supports MediaRecorder canvas capture.');
+      toast.error('Video export failed. Make sure your browser supports MediaRecorder canvas capture.');
     } finally {
       setIsExporting(false);
       setExportProgress(0);
@@ -1551,11 +1552,11 @@ export default function App() {
       });
       downloadRender(done.id, `motionforge-${done.id.slice(0, 8)}.mp4`);
       setHfRenderStatus('Download started');
-      alert('HyperFrames MP4 render complete.');
+      toast.success('HyperFrames MP4 render complete.');
     } catch (err) {
       console.error(err);
       setServerOnline(false);
-      alert(`HyperFrames render failed: ${err.message}\n\nMake sure the API is running (npm run dev) and Chrome/FFmpeg are available.`);
+      toast.error(`HyperFrames render failed: ${err.message}\n\nMake sure the API is running (npm run dev) and Chrome/FFmpeg are available.`);
     } finally {
       setIsHfRendering(false);
     }
@@ -1590,6 +1591,9 @@ export default function App() {
 
   return (
     <div className="app-container">
+      <Toaster position="top-center" toastOptions={{ 
+        style: { background: 'hsl(var(--bg-card))', color: '#fff', border: '1px solid hsl(var(--border-color))', fontSize: '13px' } 
+      }} />
       {/* HEADER SECTION */}
       <header className="app-header">
         <div className="brand">
