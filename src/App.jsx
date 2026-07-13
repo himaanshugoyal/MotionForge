@@ -59,6 +59,18 @@ import {
   checkApiHealth
 } from './utils/apiClient';
 import TimelinePanel, { TransportDock, formatTimecode } from './components/TimelinePanel';
+import {
+  createVideoClip,
+  findActiveClip,
+  sourceTimeForClip,
+  suggestInsertTime,
+  duplicateClip,
+  trimClipLeft,
+  trimClipRight,
+  updateClipTrim,
+  getClipsEnd,
+  VIDEO_DRAG_MIME
+} from './models/videoClip';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
@@ -176,6 +188,16 @@ export default function App() {
     ]
   }));
   const [selectedSceneId, setSelectedSceneId] = useState(null);
+  const [uploadedVideos, setUploadedVideos] = useState([]);
+  const [videoClips, setVideoClips] = useState([]);
+  const [selectedVideoClipId, setSelectedVideoClipId] = useState(null);
+  const activeClipIdRef = useRef(null);
+  const videoClipsRef = useRef(videoClips);
+  const isPlayingRef = useRef(isPlaying);
+  const currentTimeRef = useRef(currentTime);
+  videoClipsRef.current = videoClips;
+  isPlayingRef.current = isPlaying;
+  currentTimeRef.current = currentTime;
 
   // CSV Inputs State
   const [csvContent, setCsvContent] = useState('');
@@ -204,9 +226,18 @@ export default function App() {
   const csvInputRef = useRef(null);
   const screenshotInputRef = useRef(null);
 
-  // Selected Overlay details
+  // Selected Overlay / Video clip details
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
   const selectedScene = (project.scenes || []).find((s) => s.id === selectedSceneId) || project.scenes?.[0];
+  const selectedVideoClip = videoClips.find((c) => c.id === selectedVideoClipId) || null;
+
+  const compositionDuration = Math.max(
+    getClipsEnd(videoClips),
+    getProjectDuration(project),
+    videoClips.length ? 0 : videoDuration,
+    cropEnd,
+    0.1
+  );
 
   // Sync API model dropdown when provider changes
   useEffect(() => {
@@ -256,38 +287,141 @@ export default function App() {
     alert('API key stored securely in your browser!');
   };
 
-  // Sync video timeline playback loop
+  // Bind video element — map source time → timeline when clips exist
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime);
+      const clips = videoClipsRef.current;
+      if (clips.length > 0) {
+        const clip =
+          clips.find((c) => c.id === activeClipIdRef.current) ||
+          findActiveClip(clips, currentTimeRef.current);
+        if (!clip) return;
 
-      // Loop video back to cropStart if it goes past cropEnd
-      if (video.currentTime >= cropEnd) {
-        video.currentTime = cropStart;
-        if (!isPlaying) {
-          video.pause();
+        const local = video.currentTime - clip.sourceIn;
+        setCurrentTime(clip.timelineStart + Math.max(0, local));
+
+        if (video.currentTime >= clip.sourceOut - 0.04 && isPlayingRef.current) {
+          const next = clips
+            .filter((c) => c.timelineStart >= clip.timelineStart + clip.duration - 0.01 && c.id !== clip.id)
+            .sort((a, b) => a.timelineStart - b.timelineStart)[0];
+          if (next) {
+            activeClipIdRef.current = next.id;
+            const playNext = () => {
+              video.currentTime = next.sourceIn;
+              video.play().catch(() => {});
+            };
+            if (video.getAttribute('src') !== next.url) {
+              video.src = next.url;
+              video.load();
+              video.addEventListener('loadeddata', function onReady() {
+                playNext();
+                video.removeEventListener('loadeddata', onReady);
+              });
+              setVideoUrl(next.url);
+            } else {
+              playNext();
+            }
+            setCurrentTime(next.timelineStart);
+          } else {
+            video.pause();
+            setIsPlaying(false);
+            setCurrentTime(clip.timelineStart + clip.duration);
+          }
         }
+        return;
       }
+      setCurrentTime(video.currentTime);
     };
 
     const handleLoadedMetadata = () => {
-      const duration = video.duration || 10;
+      if (videoClipsRef.current.length > 0) return;
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 10;
       setVideoDuration(duration);
       setCropStart(0);
       setCropEnd(duration);
+      setCurrentTime(0);
+      video.currentTime = 0;
+    };
+
+    const handleError = () => {
+      console.error('Video failed to load', video.error);
     };
 
     video.addEventListener('timeupdate', handleTimeUpdate);
     video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('error', handleError);
+
+    if (videoClipsRef.current.length === 0 && video.readyState >= 1 && Number.isFinite(video.duration) && video.duration > 0) {
+      handleLoadedMetadata();
+    }
 
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('error', handleError);
     };
-  }, [cropStart, cropEnd, isPlaying]);
+  }, [videoUrl, showHyperFramesPreview]);
+
+  // Resolve active timeline clip → drive monitor src / seek (Canvas scrub / idle)
+  useEffect(() => {
+    if (showHyperFramesPreview || videoClips.length === 0) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const clip = findActiveClip(videoClips, currentTime);
+    if (!clip) {
+      activeClipIdRef.current = null;
+      return;
+    }
+
+    const target = sourceTimeForClip(clip, currentTime);
+    const srcAttr = video.getAttribute('src');
+
+    if (activeClipIdRef.current !== clip.id || srcAttr !== clip.url) {
+      activeClipIdRef.current = clip.id;
+      if (srcAttr !== clip.url) {
+        const wasPlaying = isPlaying && !video.paused;
+        video.src = clip.url;
+        video.load();
+        video.addEventListener('loadeddata', function onReady() {
+          video.currentTime = target;
+          if (wasPlaying) video.play().catch(() => {});
+          video.removeEventListener('loadeddata', onReady);
+        });
+        if (videoUrl !== clip.url) setVideoUrl(clip.url);
+        return;
+      }
+    }
+
+    if (!isPlaying && Math.abs(video.currentTime - target) > 0.12) {
+      video.currentTime = target;
+    }
+  }, [currentTime, videoClips, showHyperFramesPreview, isPlaying, videoUrl]);
+
+  // Loop within trim range while playing (legacy single-video mode only)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isPlaying || videoClips.length > 0) return;
+
+    const onTimeUpdate = () => {
+      if (video.currentTime >= cropEnd) {
+        video.currentTime = cropStart;
+      }
+    };
+    video.addEventListener('timeupdate', onTimeUpdate);
+    return () => video.removeEventListener('timeupdate', onTimeUpdate);
+  }, [isPlaying, cropStart, cropEnd, videoClips.length]);
+
+  // Extend master out-point when clips grow past it
+  useEffect(() => {
+    const end = getClipsEnd(videoClips);
+    if (end > 0 && end > cropEnd) {
+      setCropEnd(end);
+    }
+  }, [videoClips, cropEnd]);
 
   // Handle Play/Pause
   const togglePlay = () => {
@@ -297,18 +431,59 @@ export default function App() {
     if (isPlaying) {
       video.pause();
       setIsPlaying(false);
-    } else {
-      if (video.currentTime < cropStart || video.currentTime >= cropEnd) {
-        video.currentTime = cropStart;
-      }
-      video.play().then(() => {
-        setIsPlaying(true);
-      }).catch(err => console.log('Playback error:', err));
+      return;
     }
+
+    if (videoClips.length > 0) {
+      const clip = findActiveClip(videoClips, currentTime) || videoClips.slice().sort((a, b) => a.timelineStart - b.timelineStart)[0];
+      if (!clip) return;
+      if (currentTime < clip.timelineStart || currentTime >= clip.timelineStart + clip.duration) {
+        setCurrentTime(clip.timelineStart);
+      }
+      activeClipIdRef.current = clip.id;
+      const seekTo = sourceTimeForClip(clip, Math.max(currentTime, clip.timelineStart));
+      const startPlay = () => {
+        video.currentTime = seekTo;
+        video.play().then(() => setIsPlaying(true)).catch((err) => console.log('Playback error:', err));
+      };
+      if (video.getAttribute('src') !== clip.url) {
+        video.src = clip.url;
+        video.load();
+        video.addEventListener('loadeddata', function onReady() {
+          startPlay();
+          video.removeEventListener('loadeddata', onReady);
+        });
+        setVideoUrl(clip.url);
+      } else {
+        startPlay();
+      }
+      return;
+    }
+
+    if (video.currentTime < cropStart || video.currentTime >= cropEnd) {
+      video.currentTime = cropStart;
+    }
+    video.play().then(() => {
+      setIsPlaying(true);
+    }).catch(err => console.log('Playback error:', err));
   };
 
   const handleReset = () => {
     const video = videoRef.current;
+    if (videoClips.length > 0) {
+      const first = videoClips.slice().sort((a, b) => a.timelineStart - b.timelineStart)[0];
+      const t = first ? first.timelineStart : cropStart;
+      setCurrentTime(t);
+      if (video && first) {
+        activeClipIdRef.current = first.id;
+        if (video.getAttribute('src') !== first.url) {
+          video.src = first.url;
+          setVideoUrl(first.url);
+        }
+        video.currentTime = first.sourceIn;
+      }
+      return;
+    }
     if (!video) return;
     video.currentTime = cropStart;
     setCurrentTime(cropStart);
@@ -362,15 +537,234 @@ export default function App() {
     setShowHyperFramesPreview(true);
   };
 
-  // Video Upload helper
+  // Video Upload helper — switch to Canvas, list the file, load blob without CORS flag
   const handleVideoUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
-      setIsPlaying(false);
+    const file = e.target.files?.[0];
+    // allow re-uploading the same file later
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('video/') && !/\.(mp4|webm|mov|m4v)$/i.test(file.name)) {
+      alert('Please choose a video file (MP4, WebM, or MOV).');
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    const id = `upload-${Date.now()}`;
+    const entry = {
+      id,
+      name: file.name.replace(/\.[^.]+$/, '') || file.name,
+      url,
+      thumbnail: null,
+      fileName: file.name,
+      sourceDuration: null
+    };
+
+    setUploadedVideos((prev) => [entry, ...prev]);
+    setVideoUrl(url);
+    setIsPlaying(false);
+    setCurrentTime(0);
+
+    // Exit HyperFrames so the uploaded clip is visible on the program monitor
+    if (showHyperFramesPreview) {
+      if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+      setHfPreviewUrl(null);
+      setShowHyperFramesPreview(false);
+    }
+
+    // Probe duration even before the monitor video element binds
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.src = url;
+    probe.onloadedmetadata = () => {
+      const duration = Number.isFinite(probe.duration) && probe.duration > 0 ? probe.duration : 10;
+      setVideoDuration(duration);
+      setCropStart(0);
+      setCropEnd((prev) => Math.max(prev, duration));
+      setUploadedVideos((prev) =>
+        prev.map((v) => (v.id === id ? { ...v, sourceDuration: duration } : v))
+      );
+      // Capture a thumbnail frame for the assets library
+      try {
+        probe.currentTime = Math.min(0.25, duration / 4);
+      } catch {
+        /* ignore */
+      }
+    };
+    probe.onseeked = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 160;
+        canvas.height = 90;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(probe, 0, 0, 160, 90);
+        const thumb = canvas.toDataURL('image/jpeg', 0.7);
+        setUploadedVideos((prev) =>
+          prev.map((v) => (v.id === id ? { ...v, thumbnail: thumb } : v))
+        );
+      } catch {
+        /* codec may block canvas read */
+      }
+    };
+  };
+
+  const selectVideoAsset = (url) => {
+    setVideoUrl(url);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    if (showHyperFramesPreview) {
+      if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+      setHfPreviewUrl(null);
+      setShowHyperFramesPreview(false);
     }
   };
+
+  const probeSourceDuration = (url) =>
+    new Promise((resolve) => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.src = url;
+      v.onloadedmetadata = () => {
+        resolve(Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 10);
+      };
+      v.onerror = () => resolve(10);
+    });
+
+  const exitHyperFramesForCanvas = () => {
+    if (!showHyperFramesPreview) return;
+    if (hfPreviewUrl) URL.revokeObjectURL(hfPreviewUrl);
+    setHfPreviewUrl(null);
+    setShowHyperFramesPreview(false);
+  };
+
+  /** Insert a library asset onto the Video (V1) track */
+  const insertVideoClip = async (asset, timelineStart = null) => {
+    if (!asset?.url) return null;
+    const start =
+      timelineStart != null
+        ? Math.max(0, timelineStart)
+        : suggestInsertTime(videoClipsRef.current, currentTimeRef.current);
+
+    let sourceDuration = Number(asset.sourceDuration);
+    if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) {
+      sourceDuration = await probeSourceDuration(asset.url);
+    }
+
+    const clip = createVideoClip({
+      assetId: asset.id || asset.assetId || null,
+      name: asset.name || 'Video Clip',
+      url: asset.url,
+      timelineStart: start,
+      sourceDuration,
+      sourceIn: 0,
+      sourceOut: sourceDuration
+    });
+
+    setVideoClips((prev) => [...prev, clip]);
+    setSelectedVideoClipId(clip.id);
+    setSelectedOverlayId(null);
+    setVideoUrl(asset.url);
+    setIsPlaying(false);
+    setCurrentTime(start);
+    exitHyperFramesForCanvas();
+    return clip;
+  };
+
+  const handleDropVideo = (payload, timelineStart) => {
+    insertVideoClip(payload, timelineStart);
+  };
+
+  const handleAddAssetToTimeline = (e, asset) => {
+    e?.stopPropagation?.();
+    e?.preventDefault?.();
+    insertVideoClip(asset);
+  };
+
+  const handleAssetDragStart = (e, asset) => {
+    const payload = JSON.stringify({
+      url: asset.url,
+      name: asset.name,
+      sourceDuration: asset.sourceDuration || null,
+      assetId: asset.id,
+      id: asset.id
+    });
+    e.dataTransfer.setData(VIDEO_DRAG_MIME, payload);
+    e.dataTransfer.setData('application/json', payload);
+    e.dataTransfer.setData('text/plain', payload);
+    e.dataTransfer.effectAllowed = 'copy';
+  };
+
+  const handleTrimVideoClip = (clipId, edge, delta, origin) => {
+    setVideoClips((prev) =>
+      prev.map((c) => {
+        if (c.id !== clipId) return c;
+        const base = origin || c;
+        return edge === 'left' ? trimClipLeft(base, delta) : trimClipRight(base, delta);
+      })
+    );
+  };
+
+  const handleDuplicateVideoClip = () => {
+    if (!selectedVideoClip) return;
+    const copy = duplicateClip(selectedVideoClip);
+    setVideoClips((prev) => [...prev, copy]);
+    setSelectedVideoClipId(copy.id);
+    setSelectedOverlayId(null);
+  };
+
+  const handleDeleteVideoClip = () => {
+    if (!selectedVideoClipId) return;
+    setVideoClips((prev) => prev.filter((c) => c.id !== selectedVideoClipId));
+    setSelectedVideoClipId(null);
+  };
+
+  const handleUpdateVideoClipField = (key, value) => {
+    if (!selectedVideoClipId) return;
+    setVideoClips((prev) =>
+      prev.map((c) => {
+        if (c.id !== selectedVideoClipId) return c;
+        if (key === 'sourceIn' || key === 'sourceOut') {
+          return updateClipTrim(c, { [key]: parseFloat(value) || 0 });
+        }
+        if (key === 'timelineStart') {
+          return createVideoClip({ ...c, timelineStart: Math.max(0, parseFloat(value) || 0) });
+        }
+        if (key === 'name') {
+          return { ...c, name: value };
+        }
+        return c;
+      })
+    );
+  };
+
+  const handleSelectVideoClip = (id) => {
+    setSelectedVideoClipId(id);
+    setSelectedOverlayId(null);
+    setActiveRightTab('properties');
+  };
+
+  // Keyboard: Delete clip, D = duplicate
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = e.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+      if (!selectedVideoClipId) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        setVideoClips((prev) => prev.filter((c) => c.id !== selectedVideoClipId));
+        setSelectedVideoClipId(null);
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        const clip = videoClipsRef.current.find((c) => c.id === selectedVideoClipId);
+        if (!clip) return;
+        const copy = duplicateClip(clip);
+        setVideoClips((prev) => [...prev, copy]);
+        setSelectedVideoClipId(copy.id);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedVideoClipId]);
 
   // Preset Template Adder
   const handleAddPreset = (preset) => {
@@ -443,10 +837,11 @@ export default function App() {
     window.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Scrub bar helper
+  // Scrub bar helper — timeline clock; clip resolver seeks source media
   const handleScrubChange = (e) => {
     const time = parseFloat(e.target.value);
     setCurrentTime(time);
+    if (videoClipsRef.current.length > 0) return;
     const video = videoRef.current;
     if (video && Number.isFinite(video.duration) && time <= video.duration) {
       video.currentTime = time;
@@ -1015,20 +1410,58 @@ export default function App() {
                     1. Video Assets
                   </h3>
                   
-                  <div className="upload-card" onClick={() => fileInputRef.current?.click()}>
+                  <label className="upload-card" htmlFor="mf-video-upload" style={{ cursor: 'pointer' }}>
                     <Upload size={20} style={{ color: 'hsl(var(--accent-purple))' }} />
                     <div>
                       <p style={{ fontWeight: '600', fontSize: '12px' }}>Upload local video</p>
                       <p style={{ fontSize: '10px', color: 'hsl(var(--text-muted))' }}>MP4, WebM or MOV</p>
                     </div>
                     <input 
+                      id="mf-video-upload"
                       type="file" 
                       ref={fileInputRef} 
                       onChange={handleVideoUpload} 
-                      accept="video/*" 
+                      accept="video/mp4,video/webm,video/quicktime,video/*" 
                       style={{ display: 'none' }} 
                     />
-                  </div>
+                  </label>
+
+                  {uploadedVideos.length > 0 && (
+                    <div style={{ marginTop: '14px' }}>
+                      <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', marginBottom: '8px', fontWeight: 'bold' }}>Uploaded</p>
+                      <div className="media-grid">
+                        {uploadedVideos.map((item) => (
+                          <div
+                            key={item.id}
+                            className={`media-item ${videoUrl === item.url ? 'active' : ''}`}
+                            draggable
+                            onDragStart={(e) => handleAssetDragStart(e, item)}
+                            onClick={() => selectVideoAsset(item.url)}
+                            title={`${item.fileName} — drag onto Video track`}
+                          >
+                            {item.thumbnail ? (
+                              <img src={item.thumbnail} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            ) : (
+                              <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', background: '#111' }}>
+                                <Video size={22} style={{ color: 'hsl(var(--accent-cyan))' }} />
+                              </div>
+                            )}
+                            <div className="media-item-label">
+                              <span>{item.name}</span>
+                            </div>
+                            <button
+                              type="button"
+                              className="asset-add-btn"
+                              title="Add to timeline"
+                              onClick={(e) => handleAddAssetToTimeline(e, item)}
+                            >
+                              + Timeline
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div style={{ marginTop: '14px' }}>
                     <p style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', marginBottom: '8px', fontWeight: 'bold' }}>Sample library</p>
@@ -1037,15 +1470,23 @@ export default function App() {
                         <div 
                           key={item.id} 
                           className={`media-item ${videoUrl === item.url ? 'active' : ''}`}
-                          onClick={() => {
-                            setVideoUrl(item.url);
-                            setIsPlaying(false);
-                          }}
+                          draggable
+                          onDragStart={(e) => handleAssetDragStart(e, item)}
+                          onClick={() => selectVideoAsset(item.url)}
+                          title="Drag onto Video track"
                         >
                           <img src={item.thumbnail} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                           <div className="media-item-label">
                             <span>{item.name}</span>
                           </div>
+                          <button
+                            type="button"
+                            className="asset-add-btn"
+                            title="Add to timeline"
+                            onClick={(e) => handleAddAssetToTimeline(e, item)}
+                          >
+                            + Timeline
+                          </button>
                         </div>
                       ))}
                     </div>
@@ -1469,13 +1910,24 @@ export default function App() {
                   {aspectRatio === 'landscape' ? '16:9' : aspectRatio === 'portrait' ? '9:16' : '1:1'}
                 </span>
                 <span>
-                  {formatTimecode(currentTime)} / {formatTimecode(Math.max(videoDuration, getProjectDuration(project)))}
+                  {formatTimecode(currentTime)} / {formatTimecode(compositionDuration)}
                 </span>
               </div>
             </div>
 
             <div className="program-stage">
               <div className={`program-frame ${aspectRatio}`} ref={!showHyperFramesPreview ? playerContainerRef : undefined}>
+                {/* Keep video mounted always so uploads can bind metadata even in HyperFrames mode */}
+                <video
+                  ref={videoRef}
+                  src={videoUrl}
+                  className="main-video"
+                  playsInline
+                  muted
+                  preload="metadata"
+                  {...(videoUrl.startsWith('http') ? { crossOrigin: 'anonymous' } : {})}
+                  style={showHyperFramesPreview ? { position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' } : undefined}
+                />
                 {showHyperFramesPreview ? (
                   <hyperframes-player
                     src={hfPreviewUrl}
@@ -1483,16 +1935,7 @@ export default function App() {
                     style={{ width: '100%', height: '100%' }}
                   ></hyperframes-player>
                 ) : (
-                  <>
-                    <video
-                      ref={videoRef}
-                      src={videoUrl}
-                      className="main-video"
-                      playsInline
-                      muted
-                      crossOrigin="anonymous"
-                    />
-                    <div className="canvas-overlays-container">
+                  <div className="canvas-overlays-container">
                       {overlays.map((overlay) => {
                         const active = currentTime >= overlay.start && currentTime <= (overlay.start + overlay.duration);
                         if (!active) return null;
@@ -1554,8 +1997,7 @@ export default function App() {
                           </div>
                         );
                       })}
-                    </div>
-                  </>
+                  </div>
                 )}
               </div>
             </div>
@@ -1564,29 +2006,37 @@ export default function App() {
           <TransportDock
             isPlaying={isPlaying}
             currentTime={currentTime}
-            duration={Math.max(videoDuration, getProjectDuration(project))}
+            duration={compositionDuration}
             showHyperFramesPreview={showHyperFramesPreview}
             onPlay={togglePlay}
             onReset={handleReset}
           />
 
           <TimelinePanel
-            videoDuration={Math.max(videoDuration, getProjectDuration(project))}
+            videoDuration={compositionDuration}
             currentTime={currentTime}
             cropStart={cropStart}
             cropEnd={cropEnd}
             overlays={overlays}
             project={project}
+            videoClips={videoClips}
             selectedOverlayId={selectedOverlayId}
             selectedSceneId={selectedSceneId}
+            selectedVideoClipId={selectedVideoClipId}
             onScrub={handleScrubChange}
-            onSelectOverlay={setSelectedOverlayId}
+            onSelectOverlay={(id) => {
+              setSelectedOverlayId(id);
+              setSelectedVideoClipId(null);
+            }}
             onSelectScene={(id) => {
               setSelectedSceneId(id);
               setLeftTab('scenes');
             }}
+            onSelectVideoClip={handleSelectVideoClip}
             onCropStart={setCropStart}
             onCropEnd={setCropEnd}
+            onDropVideo={handleDropVideo}
+            onTrimVideoClip={handleTrimVideoClip}
           />
         </main>
 
@@ -1614,7 +2064,86 @@ export default function App() {
             {/* PROPERTIES EDITOR PANEL */}
             {activeRightTab === 'properties' && (
               <>
-                {selectedOverlay ? (
+                {selectedVideoClip ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'hsl(var(--accent-cyan))' }}>
+                        Video Clip
+                      </span>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          type="button"
+                          onClick={handleDuplicateVideoClip}
+                          style={{ background: 'transparent', border: 'none', color: 'hsl(var(--accent-cyan))', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}
+                        >
+                          <Copy size={12} />
+                          Duplicate
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDeleteVideoClip}
+                          style={{ background: 'transparent', border: 'none', color: '#ff4d4d', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px' }}
+                        >
+                          <Trash2 size={12} />
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="form-group">
+                      <label>Name</label>
+                      <input
+                        type="text"
+                        value={selectedVideoClip.name}
+                        onChange={(e) => handleUpdateVideoClipField('name', e.target.value)}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>Timeline Start (s)</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={Number(selectedVideoClip.timelineStart).toFixed(1)}
+                        onChange={(e) => handleUpdateVideoClipField('timelineStart', e.target.value)}
+                      />
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                      <div className="form-group">
+                        <label>Source In</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          max={selectedVideoClip.sourceOut - 0.2}
+                          value={Number(selectedVideoClip.sourceIn).toFixed(2)}
+                          onChange={(e) => handleUpdateVideoClipField('sourceIn', e.target.value)}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Source Out</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min={selectedVideoClip.sourceIn + 0.2}
+                          max={selectedVideoClip.sourceDuration}
+                          value={Number(selectedVideoClip.sourceOut).toFixed(2)}
+                          onChange={(e) => handleUpdateVideoClipField('sourceOut', e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ fontSize: '11px', color: 'hsl(var(--text-muted))', lineHeight: 1.5 }}>
+                      <div>Duration on timeline: <strong style={{ color: 'hsl(var(--text-primary))' }}>{selectedVideoClip.duration.toFixed(2)}s</strong></div>
+                      <div>Source length: {selectedVideoClip.sourceDuration.toFixed(2)}s</div>
+                      <p style={{ marginTop: '8px', fontStyle: 'italic' }}>
+                        Drag the clip edges on the Video track to trim, or edit Source In/Out here.
+                      </p>
+                    </div>
+                  </div>
+                ) : selectedOverlay ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                       <span style={{ fontSize: '12px', fontWeight: 'bold', color: 'hsl(var(--accent-purple))' }}>
@@ -1723,7 +2252,9 @@ export default function App() {
                 ) : (
                   <div style={{ textAlign: 'center', padding: '40px 10px', color: 'hsl(var(--text-muted))' }}>
                     <Layers size={24} style={{ marginBottom: '10px', opacity: 0.5 }} />
-                    <p style={{ fontSize: '12px' }}>Select an overlay on the player canvas or timeline to view its properties.</p>
+                    <p style={{ fontSize: '12px' }}>
+                      Select a video clip or overlay on the timeline to edit properties. Drag assets onto the Video track to add clips.
+                    </p>
                   </div>
                 )}
               </>

@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Layers, SkipBack, Play, Pause, RotateCcw } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
+import { getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
 export function formatTimecode(seconds = 0) {
   const s = Math.max(0, Number(seconds) || 0);
@@ -28,26 +29,37 @@ function buildRulerTicks(duration) {
 }
 
 /**
- * Professional timeline: gutter + ruler + scene/overlay tracks + shared playhead.
+ * Professional timeline with Video (V1) track + scenes + overlays.
  */
 export default function TimelinePanel({
   videoDuration,
   currentTime,
   cropStart,
   cropEnd,
-  overlays,
+  overlays = [],
   project,
+  videoClips = [],
   selectedOverlayId,
   selectedSceneId,
+  selectedVideoClipId,
   onScrub,
   onSelectOverlay,
   onSelectScene,
+  onSelectVideoClip,
   onCropStart,
-  onCropEnd
+  onCropEnd,
+  onDropVideo,
+  onTrimVideoClip
 }) {
+  const videoTrackRef = useRef(null);
+  const [dragOverVideo, setDragOverVideo] = useState(false);
+  const trimDragRef = useRef(null);
+
   const duration = Math.max(
     videoDuration || 0,
     getProjectDuration(project) || 0,
+    getClipsEnd(videoClips) || 0,
+    cropEnd || 0,
     0.1
   );
   const ticks = useMemo(() => buildRulerTicks(duration), [duration]);
@@ -67,6 +79,70 @@ export default function TimelinePanel({
       return block;
     });
   }, [project?.scenes]);
+
+  const parseDropPayload = (e) => {
+    const raw =
+      e.dataTransfer.getData(VIDEO_DRAG_MIME) ||
+      e.dataTransfer.getData('application/json') ||
+      e.dataTransfer.getData('text/plain');
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  const timeFromClientX = (clientX) => {
+    const el = videoTrackRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return pct * duration;
+  };
+
+  const handleVideoDrop = (e) => {
+    e.preventDefault();
+    setDragOverVideo(false);
+    const payload = parseDropPayload(e);
+    if (!payload?.url) return;
+    const timelineStart = timeFromClientX(e.clientX);
+    onDropVideo?.(payload, timelineStart);
+  };
+
+  const startTrim = (e, clipId, edge) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const clip = videoClips.find((c) => c.id === clipId);
+    if (!clip || !onTrimVideoClip) return;
+    trimDragRef.current = {
+      clipId,
+      edge,
+      startX: e.clientX,
+      origin: { ...clip }
+    };
+    onSelectVideoClip?.(clipId);
+
+    const onMove = (ev) => {
+      const state = trimDragRef.current;
+      if (!state) return;
+      const el = videoTrackRef.current;
+      if (!el) return;
+      const pxPerSec = el.getBoundingClientRect().width / duration;
+      const delta = (ev.clientX - state.startX) / pxPerSec;
+      onTrimVideoClip(state.clipId, state.edge, delta, state.origin);
+    };
+    const onUp = () => {
+      trimDragRef.current = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const isEmpty =
+    videoClips.length === 0 && overlays.length === 0 && sceneBlocks.length === 0;
 
   return (
     <div className="timeline-panel">
@@ -104,10 +180,10 @@ export default function TimelinePanel({
 
       <div className="timeline-body pro-timeline-body">
         <div className="tl-grid">
-          {/* Gutter column */}
           <div className="tl-gutter">
             <div className="tl-gutter-ruler-spacer" />
             <div className="tl-gutter-master-spacer" title="Master trim">Master</div>
+            <div className={`tl-gutter-label ${selectedVideoClipId ? 'active' : ''}`}>Video</div>
             {sceneBlocks.length > 0 && (
               <div className="tl-gutter-label">Scenes</div>
             )}
@@ -117,24 +193,19 @@ export default function TimelinePanel({
                 className={`tl-gutter-label ${selectedOverlayId === layer.id ? 'active' : ''}`}
                 title={layer.text || layer.name || `Track ${i + 1}`}
               >
-                {layer.name || layer.text || `V${i + 1}`}
+                {layer.name || layer.text || `L${i + 1}`}
               </div>
             ))}
-            {overlays.length === 0 && sceneBlocks.length === 0 && (
-              <div className="tl-gutter-label muted">Empty</div>
+            {isEmpty && (
+              <div className="tl-gutter-label muted">Drop video</div>
             )}
           </div>
 
-          {/* Tracks column */}
           <div className="tl-tracks">
-            <div
-              className="tl-playhead"
-              style={{ left: `${playheadPct}%` }}
-            >
+            <div className="tl-playhead" style={{ left: `${playheadPct}%` }}>
               <div className="tl-playhead-head" />
             </div>
 
-            {/* Ruler */}
             <div className="tl-ruler">
               {ticks.map((tick) => (
                 <div
@@ -143,13 +214,14 @@ export default function TimelinePanel({
                   style={{ left: `${(tick.time / duration) * 100}%` }}
                 >
                   {tick.major && (
-                    <span className="tl-ruler-label">{tick.time % 1 === 0 ? `${tick.time}s` : tick.time.toFixed(1)}</span>
+                    <span className="tl-ruler-label">
+                      {tick.time % 1 === 0 ? `${tick.time}s` : tick.time.toFixed(1)}
+                    </span>
                   )}
                 </div>
               ))}
             </div>
 
-            {/* Master trim strip */}
             <div className="tl-master">
               <div
                 className="tl-trim-region"
@@ -158,8 +230,8 @@ export default function TimelinePanel({
                   width: `${(Math.max(0, cropEnd - cropStart) / duration) * 100}%`
                 }}
               >
-                <span className="tl-trim-handle start" title="Trim in" />
-                <span className="tl-trim-handle end" title="Trim out" />
+                <span className="tl-trim-handle start" title="Composition in" />
+                <span className="tl-trim-handle end" title="Composition out" />
               </div>
               <input
                 type="range"
@@ -172,7 +244,55 @@ export default function TimelinePanel({
               />
             </div>
 
-            {/* Scenes lane */}
+            {/* Video V1 track — drop target */}
+            <div
+              ref={videoTrackRef}
+              className={`tl-track-row tl-video-track ${dragOverVideo ? 'drag-over' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                setDragOverVideo(true);
+              }}
+              onDragLeave={() => setDragOverVideo(false)}
+              onDrop={handleVideoDrop}
+            >
+              {videoClips.length === 0 && (
+                <div className="tl-drop-hint">Drag videos here · or use Add to timeline</div>
+              )}
+              {videoClips.map((clip) => (
+                <div
+                  key={clip.id}
+                  role="button"
+                  tabIndex={0}
+                  className={`tl-clip video ${selectedVideoClipId === clip.id ? 'selected' : ''}`}
+                  style={{
+                    left: `${(clip.timelineStart / duration) * 100}%`,
+                    width: `${(clip.duration / duration) * 100}%`
+                  }}
+                  title={`${clip.name} (${clip.duration.toFixed(1)}s)`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectVideoClip?.(clip.id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') onSelectVideoClip?.(clip.id);
+                  }}
+                >
+                  <span
+                    className="tl-clip-edge left"
+                    onPointerDown={(e) => startTrim(e, clip.id, 'left')}
+                    title="Trim in"
+                  />
+                  <span className="tl-clip-label">{clip.name}</span>
+                  <span
+                    className="tl-clip-edge right"
+                    onPointerDown={(e) => startTrim(e, clip.id, 'right')}
+                    title="Trim out"
+                  />
+                </div>
+              ))}
+            </div>
+
             {sceneBlocks.length > 0 && (
               <div className="tl-track-row">
                 {sceneBlocks.map((scene) => (
@@ -193,7 +313,6 @@ export default function TimelinePanel({
               </div>
             )}
 
-            {/* Overlay lanes */}
             {overlays.map((layer) => (
               <div key={layer.id} className="tl-track-row">
                 <button
@@ -210,10 +329,6 @@ export default function TimelinePanel({
                 </button>
               </div>
             ))}
-
-            {overlays.length === 0 && sceneBlocks.length === 0 && (
-              <div className="tl-empty">Add scenes or overlays to populate the timeline.</div>
-            )}
           </div>
         </div>
       </div>
@@ -221,7 +336,6 @@ export default function TimelinePanel({
   );
 }
 
-/** Transport dock between monitor and timeline */
 export function TransportDock({
   isPlaying,
   currentTime,
