@@ -266,6 +266,110 @@ ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as bina
   throw new Error('Unsupported API provider selected.');
 }
 
+const ENHANCE_PROMPT_SYSTEM = `You are an expert AI video prompt engineer. Your job is to take a basic user prompt and any provided context (like website text or document summaries), and rewrite the prompt into a highly descriptive, vivid, and optimized prompt for an AI video generation agent.
+Return ONLY the raw prompt text string. Do not wrap in quotes or markdown. Make it compelling, structured, and focused on visual storytelling, motion design, and key messaging.`;
+
+export async function enhanceAIPrompt({
+  provider,
+  model,
+  apiKey,
+  promptText,
+  pdfText,
+  webpageText,
+  contentBrief,
+  proxyUrl = ''
+}) {
+  const briefBlock = contentBrief
+    ? `\n\nCONTENT BRIEF:\n${JSON.stringify(contentBrief, null, 2)}`
+    : '';
+
+  const userQuery = `Current Prompt/Goal: ${promptText || '(None provided, suggest one based on the context)'}
+${webpageText ? `\n\nCrawled Website Data:\n${webpageText}` : ''}
+${pdfText ? `\n\nExtracted PDF Text:\n${pdfText}` : ''}
+${briefBlock}
+
+Rewrite or auto-suggest a professional motion graphics video prompt based on this.`;
+
+  if (provider === 'gemini') {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const payload = {
+      contents: [{ role: 'user', parts: [{ text: `${ENHANCE_PROMPT_SYSTEM}\n\n${userQuery}` }] }]
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error?.message || `Gemini API returned status ${res.status}`);
+    }
+
+    const data = await res.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  }
+
+  if (provider === 'openai') {
+    const url = 'https://api.openai.com/v1/chat/completions';
+    const payload = {
+      model,
+      messages: [
+        { role: 'system', content: ENHANCE_PROMPT_SYSTEM },
+        { role: 'user', content: userQuery }
+      ]
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error?.message || `OpenAI API returned status ${res.status}`);
+    }
+
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content?.trim() || '';
+  }
+
+  if (provider === 'claude') {
+    const baseUrl = proxyUrl || 'https://api.anthropic.com/v1/messages';
+    const payload = {
+      model,
+      max_tokens: 2000,
+      system: ENHANCE_PROMPT_SYSTEM,
+      messages: [{ role: 'user', content: userQuery }]
+    };
+
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Claude API returned status ${res.status}: ${errText || res.statusText}`);
+    }
+
+    const data = await res.json();
+    return data.content?.[0]?.text?.trim() || '';
+  }
+
+  throw new Error('Unsupported API provider selected.');
+}
+
 function parseJSONContent(text) {
   if (!text) throw new Error('Empty response from AI model.');
 

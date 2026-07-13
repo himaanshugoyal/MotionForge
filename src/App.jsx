@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
-import { scrapeWebsite, generateAIComposition, briefFromPdfText } from './utils/aiService';
+import { scrapeWebsite, generateAIComposition, briefFromPdfText, enhanceAIPrompt } from './utils/aiService';
 import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
 import {
   createProject,
@@ -179,6 +179,7 @@ export default function App() {
   const [pdfText, setPdfText] = useState('');
   const [pdfFileName, setPdfFileName] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
+  const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
   const [contentBrief, setContentBrief] = useState(null);
   const [screenshotAsset, setScreenshotAsset] = useState(null);
   const [imageBase64, setImageBase64] = useState('');
@@ -1320,6 +1321,37 @@ export default function App() {
     }
   };
 
+  const handleEnhancePrompt = async () => {
+    if (!apiKey) {
+      toast.error('Please configure and save your API Key in settings first!');
+      setShowConfig(true);
+      return;
+    }
+    setIsEnhancingPrompt(true);
+    try {
+      const enhanced = await enhanceAIPrompt({
+        provider: apiProvider,
+        model: apiModel,
+        apiKey,
+        promptText: aiPrompt,
+        pdfText,
+        webpageText: scrapedDataText || rawHtmlPaste,
+        contentBrief
+      });
+      if (enhanced) {
+        setAiPrompt(enhanced);
+        toast.success('Prompt enhanced successfully!');
+      } else {
+        toast.error('AI returned an empty prompt.');
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(`Enhancement failed: ${err.message}`);
+    } finally {
+      setIsEnhancingPrompt(false);
+    }
+  };
+
   // Trigger AI Pipeline
   const handleTriggerAI = async () => {
     commitPendingHistory();
@@ -2044,7 +2076,19 @@ export default function App() {
 
                 {/* Prompt Details */}
                 <div className="form-group">
-                  <label>Creative Goal Prompt</label>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <label style={{ marginBottom: 0 }}>Creative Goal Prompt</label>
+                    <button 
+                      className="action-btn secondary" 
+                      onClick={handleEnhancePrompt}
+                      disabled={isEnhancingPrompt}
+                      style={{ padding: '2px 8px', fontSize: '10px', height: '22px' }}
+                      title="Auto-suggest or rewrite prompt based on uploaded context"
+                    >
+                      <Sparkles size={10} style={{ marginRight: '4px' }} />
+                      {isEnhancingPrompt ? 'Enhancing...' : 'Enhance (AI)'}
+                    </button>
+                  </div>
                   <textarea 
                     rows="3"
                     value={aiPrompt}
