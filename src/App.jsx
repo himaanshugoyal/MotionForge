@@ -185,6 +185,11 @@ export default function App() {
   });
   const [apiModel, setApiModel] = useState(() => getDefaultModelForProvider('gemini'));
   const [showConfig, setShowConfig] = useState(false);
+  const [timelineVisibility, setTimelineVisibility] = useState({
+    videoTrack: true,
+    scenesTrack: true,
+    overlays: {}
+  });
 
   // AI Generation Inputs
   const [aiPrompt, setAiPrompt] = useState('Analyze webpage layout and turn it into a product reveal intro video with bold motion titles.');
@@ -217,6 +222,7 @@ export default function App() {
   const [uploadedVideos, setUploadedVideos] = useState([]);
   const [videoClips, setVideoClips] = useState([]);
   const [selectedVideoClipId, setSelectedVideoClipId] = useState(null);
+  const [selectedVideoClipIds, setSelectedVideoClipIds] = useState([]);
   const [isRippleEnabled, setIsRippleEnabled] = useState(true);
   const activeClipIdRef = useRef(null);
   const videoClipsRef = useRef(videoClips);
@@ -409,6 +415,9 @@ export default function App() {
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
   const selectedScene = (project.scenes || []).find((s) => s.id === selectedSceneId) || project.scenes?.[0];
   const selectedVideoClip = videoClips.find((c) => c.id === selectedVideoClipId) || null;
+  const activeSelectedVideoClips = selectedVideoClipIds
+    .map((id) => videoClips.find((c) => c.id === id))
+    .filter(Boolean);
 
   const compositionDuration = Math.max(
     getClipsEnd(videoClips),
@@ -417,6 +426,32 @@ export default function App() {
     cropEnd,
     0.1
   );
+
+  const isOverlayVisibleInTimeline = (overlayId) => timelineVisibility.overlays[overlayId] !== false;
+
+  const toggleVideoTrackVisibility = () => {
+    setTimelineVisibility((prev) => ({
+      ...prev,
+      videoTrack: !prev.videoTrack
+    }));
+  };
+
+  const toggleScenesTrackVisibility = () => {
+    setTimelineVisibility((prev) => ({
+      ...prev,
+      scenesTrack: !prev.scenesTrack
+    }));
+  };
+
+  const toggleOverlayVisibility = (overlayId) => {
+    setTimelineVisibility((prev) => ({
+      ...prev,
+      overlays: {
+        ...prev.overlays,
+        [overlayId]: prev.overlays[overlayId] === false ? true : false
+      }
+    }));
+  };
 
   const handleProviderChange = (nextProvider) => {
     setApiProvider(nextProvider);
@@ -524,6 +559,32 @@ export default function App() {
       setSelectedSceneId(project.scenes[0].id);
     }
   }, [project.scenes, selectedSceneId]);
+
+  // Keep selected clip ids in sync when clips are removed/replaced
+  useEffect(() => {
+    const clipIdSet = new Set(videoClips.map((c) => c.id));
+    setSelectedVideoClipIds((prev) => prev.filter((id) => clipIdSet.has(id)));
+
+    if (selectedVideoClipId && !clipIdSet.has(selectedVideoClipId)) {
+      setSelectedVideoClipId(null);
+    }
+  }, [videoClips, selectedVideoClipId]);
+
+  // Prune stale per-overlay visibility entries when overlays are removed/replaced
+  useEffect(() => {
+    const overlayIdSet = new Set(overlays.map((o) => o.id));
+    setTimelineVisibility((prev) => {
+      const staleIds = Object.keys(prev.overlays).filter((id) => !overlayIdSet.has(id));
+      if (!staleIds.length) return prev;
+
+      const nextOverlaysVisibility = { ...prev.overlays };
+      staleIds.forEach((id) => delete nextOverlaysVisibility[id]);
+      return {
+        ...prev,
+        overlays: nextOverlaysVisibility
+      };
+    });
+  }, [overlays]);
 
   // Keep project aspect / background video aligned with editor
   useEffect(() => {
@@ -953,6 +1014,7 @@ export default function App() {
 
     setVideoClips((prev) => [...prev, clip]);
     setSelectedVideoClipId(clip.id);
+    setSelectedVideoClipIds([clip.id]);
     setSelectedOverlayId(null);
     setVideoUrl(asset.url);
     setIsPlaying(false);
@@ -1021,9 +1083,11 @@ export default function App() {
   };
 
   const handleAutoGenerateGraphics = async () => {
-    if (!selectedVideoClipId) return;
-    const clip = videoClips.find(c => c.id === selectedVideoClipId);
-    if (!clip || !clip.url) return;
+    const targetClips = activeSelectedVideoClips.length
+      ? activeSelectedVideoClips
+      : (selectedVideoClipId ? videoClips.filter((c) => c.id === selectedVideoClipId) : []);
+    const clipsWithAudio = targetClips.filter((clip) => clip?.url);
+    if (!clipsWithAudio.length) return;
     
     if (apiProvider !== 'gemini') {
       toast.error('Auto-GFX requires the Gemini API. Please switch your provider in API Keys settings.');
@@ -1039,33 +1103,57 @@ export default function App() {
     setAiLoading(true);
 
     try {
-      toast('Extracting audio track...', { icon: '🎧' });
-      const audioBase64 = await extractAudioAsWavBase64(clip.url, clip.sourceIn, clip.sourceOut);
-      if (!audioBase64) {
-        throw new Error('Failed to extract audio from the clip.');
+      let totalGenerated = 0;
+      let failedClips = 0;
+      const accumulatedOverlays = [];
+
+      for (let i = 0; i < clipsWithAudio.length; i += 1) {
+        const clip = clipsWithAudio[i];
+        try {
+          toast(`Auto-GFX ${i + 1}/${clipsWithAudio.length}: extracting audio`, { icon: '🎧' });
+          const audioBase64 = await extractAudioAsWavBase64(clip.url, clip.sourceIn, clip.sourceOut);
+          if (!audioBase64) {
+            throw new Error('Failed to extract audio from the clip.');
+          }
+
+          toast(`Auto-GFX ${i + 1}/${clipsWithAudio.length}: analyzing speech`, { icon: '🧠' });
+          const generatedOverlays = await analyzeSpeechAndGenerateGraphics({
+            apiKey,
+            model: AUTO_GFX_GEMINI_MODEL,
+            audioBase64
+          });
+
+          if (!generatedOverlays || generatedOverlays.length === 0) {
+            continue;
+          }
+
+          const mappedOverlays = generatedOverlays.map((o) => ({
+            ...o,
+            id: `auto-gfx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            start: clip.timelineStart + (o.start || 0)
+          }));
+
+          totalGenerated += mappedOverlays.length;
+          accumulatedOverlays.push(...mappedOverlays);
+        } catch (err) {
+          failedClips += 1;
+          console.error(err);
+        }
       }
 
-      toast('Analyzing speech...', { icon: '🧠' });
-      const generatedOverlays = await analyzeSpeechAndGenerateGraphics({
-        apiKey,
-        model: AUTO_GFX_GEMINI_MODEL,
-        audioBase64
-      });
-
-      if (!generatedOverlays || generatedOverlays.length === 0) {
-        toast.error('AI found no suitable moments for graphics.');
-        return;
+      if (accumulatedOverlays.length) {
+        setOverlays((prev) => [...prev, ...accumulatedOverlays]);
       }
 
-      // Map overlays to timeline and merge
-      const newOverlays = generatedOverlays.map(o => ({
-        ...o,
-        id: `auto-gfx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        start: clip.timelineStart + (o.start || 0)
-      }));
+      if (!totalGenerated) {
+        toast.error('AI found no suitable moments for graphics in selected clips.');
+      } else {
+        toast.success(`Generated ${totalGenerated} synced graphics from ${clipsWithAudio.length} selected clip(s).`);
+      }
 
-      setOverlays(prev => [...prev, ...newOverlays]);
-      toast.success(`Generated ${newOverlays.length} synced graphics!`);
+      if (failedClips > 0) {
+        toast.error(`Auto-GFX skipped ${failedClips} clip(s) due to processing errors.`);
+      }
       
     } catch (err) {
       console.error(err);
@@ -1139,6 +1227,7 @@ export default function App() {
       });
       
       setSelectedVideoClipId(newClips[0].id);
+      setSelectedVideoClipIds(newClips.map((c) => c.id));
       
     } catch (err) {
       console.error(err);
@@ -1171,6 +1260,7 @@ export default function App() {
       return next;
     });
     setSelectedVideoClipId(right.id);
+    setSelectedVideoClipIds([right.id]);
     setSelectedOverlayId(null);
     setActiveRightTab('properties');
   };
@@ -1181,6 +1271,7 @@ export default function App() {
     const copy = duplicateClip(selectedVideoClip);
     setVideoClips((prev) => [...prev, copy]);
     setSelectedVideoClipId(copy.id);
+    setSelectedVideoClipIds([copy.id]);
     setSelectedOverlayId(null);
   };
 
@@ -1205,6 +1296,7 @@ export default function App() {
     });
     
     setSelectedVideoClipId(null);
+    setSelectedVideoClipIds([]);
   };
 
   const handleUpdateVideoClipField = (key, value) => {
@@ -1226,8 +1318,27 @@ export default function App() {
     );
   };
 
-  const handleSelectVideoClip = (id) => {
-    setSelectedVideoClipId(id);
+  const handleSelectVideoClip = (id, options = {}) => {
+    const { append = false } = options;
+
+    if (append) {
+      setSelectedVideoClipIds((prev) => {
+        const exists = prev.includes(id);
+        const next = exists ? prev.filter((clipId) => clipId !== id) : [...prev, id];
+
+        if (exists && selectedVideoClipId === id) {
+          setSelectedVideoClipId(next[next.length - 1] || null);
+        } else {
+          setSelectedVideoClipId(id);
+        }
+
+        return next;
+      });
+    } else {
+      setSelectedVideoClipId(id);
+      setSelectedVideoClipIds([id]);
+    }
+
     setSelectedOverlayId(null);
     setActiveRightTab('properties');
   };
@@ -2556,6 +2667,7 @@ export default function App() {
                 ) : (
                   <div className="canvas-overlays-container">
                       {overlays.map((overlay) => {
+                        if (!isOverlayVisibleInTimeline(overlay.id)) return null;
                         const active = currentTime >= overlay.start && currentTime <= (overlay.start + overlay.duration);
                         if (!active) return null;
 
@@ -2651,10 +2763,12 @@ export default function App() {
             selectedOverlayId={selectedOverlayId}
             selectedSceneId={selectedSceneId}
             selectedVideoClipId={selectedVideoClipId}
+            selectedVideoClipIds={selectedVideoClipIds}
             onScrub={handleScrubChange}
             onSelectOverlay={(id) => {
               setSelectedOverlayId(id);
               setSelectedVideoClipId(null);
+              setSelectedVideoClipIds([]);
             }}
             onSelectScene={(id) => {
               setSelectedSceneId(id);
@@ -2671,6 +2785,12 @@ export default function App() {
             onAutoGenerateGraphics={handleAutoGenerateGraphics}
             isRippleEnabled={isRippleEnabled}
             onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
+            isVideoTrackVisible={timelineVisibility.videoTrack}
+            isScenesTrackVisible={timelineVisibility.scenesTrack}
+            isOverlayVisible={isOverlayVisibleInTimeline}
+            onToggleVideoTrackVisibility={toggleVideoTrackVisibility}
+            onToggleScenesTrackVisibility={toggleScenesTrackVisibility}
+            onToggleOverlayVisibility={toggleOverlayVisibility}
           />
         </main>
 

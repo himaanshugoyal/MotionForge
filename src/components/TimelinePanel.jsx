@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2, Link } from 'lucide-react';
+import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2, Link, Eye, EyeOff } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
 import { findActiveClip, getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
@@ -118,6 +118,7 @@ export default function TimelinePanel({
   selectedOverlayId,
   selectedSceneId,
   selectedVideoClipId,
+  selectedVideoClipIds = [],
   onScrub,
   onSelectOverlay,
   onSelectScene,
@@ -131,7 +132,13 @@ export default function TimelinePanel({
   onAutoTrimSilence,
   onAutoGenerateGraphics,
   isRippleEnabled,
-  onToggleRipple
+  onToggleRipple,
+  isVideoTrackVisible = true,
+  isScenesTrackVisible = true,
+  isOverlayVisible,
+  onToggleVideoTrackVisibility,
+  onToggleScenesTrackVisibility,
+  onToggleOverlayVisibility
 }) {
   const videoTrackRef = useRef(null);
   const [dragOverVideo, setDragOverVideo] = useState(false);
@@ -147,6 +154,7 @@ export default function TimelinePanel({
   );
   const ticks = useMemo(() => buildRulerTicks(duration), [duration]);
   const playheadPct = Math.min(100, Math.max(0, (currentTime / duration) * 100));
+  const hasVideoSelection = selectedVideoClipIds.length > 0 || !!selectedVideoClipId;
 
   const canSplit = useMemo(() => {
     const clip =
@@ -261,7 +269,7 @@ export default function TimelinePanel({
       startX: e.clientX,
       origin: { ...clip }
     };
-    onSelectVideoClip?.(clipId);
+    onSelectVideoClip?.(clipId, { append: false });
     window.addEventListener('pointermove', onInteractionMove);
     window.addEventListener('pointerup', endInteraction);
   };
@@ -278,7 +286,7 @@ export default function TimelinePanel({
       startX: e.clientX,
       origin: { ...clip }
     };
-    onSelectVideoClip?.(clipId);
+    onSelectVideoClip?.(clipId, { append: !!e.shiftKey });
     window.addEventListener('pointermove', onInteractionMove);
     window.addEventListener('pointerup', endInteraction);
   };
@@ -339,9 +347,9 @@ export default function TimelinePanel({
             </button>
             <button
               type="button"
-              className={`tl-tool-btn auto-trim ${selectedVideoClipId ? '' : 'disabled'}`}
-              title="Auto Generate Graphics from Speech"
-              disabled={!selectedVideoClipId}
+              className={`tl-tool-btn auto-trim ${hasVideoSelection ? '' : 'disabled'}`}
+              title="Auto Generate Graphics from selected speech clips"
+              disabled={!hasVideoSelection}
               onClick={() => onAutoGenerateGraphics && onAutoGenerateGraphics()}
               style={{ color: 'hsl(var(--accent-purple))', borderColor: 'rgba(168, 85, 247, 0.4)' }}
             >
@@ -379,12 +387,38 @@ export default function TimelinePanel({
           <div className="tl-gutter">
             <div className="tl-gutter-ruler-spacer" />
             <div className="tl-gutter-master-spacer" title="Master trim">Master</div>
-            <div className={`tl-gutter-label video-track ${selectedVideoClipId ? 'active' : ''}`}>
-              <Video size={11} />
-              <span>Video 1</span>
+            <div className={`tl-gutter-label video-track ${hasVideoSelection ? 'active' : ''}`}>
+              <span className={`tl-gutter-text ${!isVideoTrackVisible ? 'hidden' : ''}`}>
+                <Video size={11} />
+                <span>Video 1</span>
+              </span>
+              <button
+                type="button"
+                className="tl-row-visibility-btn"
+                title={isVideoTrackVisible ? 'Hide Video 1 track' : 'Show Video 1 track'}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleVideoTrackVisibility?.();
+                }}
+              >
+                {isVideoTrackVisible ? <Eye size={11} /> : <EyeOff size={11} />}
+              </button>
             </div>
             {sceneBlocks.length > 0 && (
-              <div className="tl-gutter-label">Scenes</div>
+              <div className="tl-gutter-label">
+                <span className={`tl-gutter-text ${!isScenesTrackVisible ? 'hidden' : ''}`}>Scenes</span>
+                <button
+                  type="button"
+                  className="tl-row-visibility-btn"
+                  title={isScenesTrackVisible ? 'Hide scenes track' : 'Show scenes track'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleScenesTrackVisibility?.();
+                  }}
+                >
+                  {isScenesTrackVisible ? <Eye size={11} /> : <EyeOff size={11} />}
+                </button>
+              </div>
             )}
             {overlays.map((layer, i) => (
               <div
@@ -392,7 +426,20 @@ export default function TimelinePanel({
                 className={`tl-gutter-label ${selectedOverlayId === layer.id ? 'active' : ''}`}
                 title={layer.text || layer.name || `Track ${i + 1}`}
               >
-                {layer.name || layer.text || `L${i + 1}`}
+                <span className={`tl-gutter-text ${isOverlayVisible && !isOverlayVisible(layer.id) ? 'hidden' : ''}`}>
+                  {layer.name || layer.text || `L${i + 1}`}
+                </span>
+                <button
+                  type="button"
+                  className="tl-row-visibility-btn"
+                  title={isOverlayVisible && isOverlayVisible(layer.id) ? 'Hide track item' : 'Show track item'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleOverlayVisibility?.(layer.id);
+                  }}
+                >
+                  {isOverlayVisible && isOverlayVisible(layer.id) ? <Eye size={11} /> : <EyeOff size={11} />}
+                </button>
               </div>
             ))}
             {isEmpty && (
@@ -451,59 +498,63 @@ export default function TimelinePanel({
             </div>
 
             {/* Video V1 track — drop / move / trim */}
-            <div
-              ref={videoTrackRef}
-              className={`tl-track-row tl-video-track ${dragOverVideo ? 'drag-over' : ''}`}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'copy';
-                setDragOverVideo(true);
-              }}
-              onDragLeave={() => setDragOverVideo(false)}
-              onDrop={handleVideoDrop}
-            >
-              {videoClips.length === 0 && (
-                <div className="tl-drop-hint">Drag videos here · trim edges · drag body to move · Split to cut</div>
-              )}
-              {videoClips.map((clip) => (
-                <div
-                  key={clip.id}
-                  role="button"
-                  tabIndex={0}
-                  className={`tl-clip video pro ${selectedVideoClipId === clip.id ? 'selected' : ''}`}
-                  style={{
-                    left: `${(clip.timelineStart / duration) * 100}%`,
-                    width: `${(clip.duration / duration) * 100}%`
-                  }}
-                  title={`${clip.name} · drag to move · edges to trim`}
-                  onPointerDown={(e) => startMove(e, clip.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') onSelectVideoClip?.(clip.id);
-                  }}
-                >
-                  <span
-                    className="tl-clip-edge left"
-                    onPointerDown={(e) => startTrim(e, clip.id, 'left')}
-                    title="Trim in"
-                  />
-                  <div className="tl-clip-body">
-                    <div className="tl-clip-header">
-                      <Video size={10} />
-                      <span className="tl-clip-label">{clip.name}</span>
+            {isVideoTrackVisible && (
+              <div
+                ref={videoTrackRef}
+                className={`tl-track-row tl-video-track ${dragOverVideo ? 'drag-over' : ''}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                  setDragOverVideo(true);
+                }}
+                onDragLeave={() => setDragOverVideo(false)}
+                onDrop={handleVideoDrop}
+              >
+                {videoClips.length === 0 && (
+                  <div className="tl-drop-hint">Drag videos here · trim edges · drag body to move · Split to cut</div>
+                )}
+                {videoClips.map((clip) => (
+                  <div
+                    key={clip.id}
+                    role="button"
+                    tabIndex={0}
+                    className={`tl-clip video pro ${(selectedVideoClipId === clip.id || selectedVideoClipIds.includes(clip.id)) ? 'selected' : ''}`}
+                    style={{
+                      left: `${(clip.timelineStart / duration) * 100}%`,
+                      width: `${(clip.duration / duration) * 100}%`
+                    }}
+                    title={`${clip.name} · drag to move · edges to trim`}
+                    onPointerDown={(e) => startMove(e, clip.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        onSelectVideoClip?.(clip.id, { append: e.shiftKey });
+                      }
+                    }}
+                  >
+                    <span
+                      className="tl-clip-edge left"
+                      onPointerDown={(e) => startTrim(e, clip.id, 'left')}
+                      title="Trim in"
+                    />
+                    <div className="tl-clip-body">
+                      <div className="tl-clip-header">
+                        <Video size={10} />
+                        <span className="tl-clip-label">{clip.name}</span>
+                      </div>
+                      <div className="tl-clip-filmstrip" aria-hidden />
+                      {renderClipWaveform(clip)}
                     </div>
-                    <div className="tl-clip-filmstrip" aria-hidden />
-                    {renderClipWaveform(clip)}
+                    <span
+                      className="tl-clip-edge right"
+                      onPointerDown={(e) => startTrim(e, clip.id, 'right')}
+                      title="Trim out"
+                    />
                   </div>
-                  <span
-                    className="tl-clip-edge right"
-                    onPointerDown={(e) => startTrim(e, clip.id, 'right')}
-                    title="Trim out"
-                  />
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
 
-            {sceneBlocks.length > 0 && (
+            {sceneBlocks.length > 0 && isScenesTrackVisible && (
               <div className="tl-track-row">
                 {sceneBlocks.map((scene) => (
                   <button
@@ -524,20 +575,22 @@ export default function TimelinePanel({
             )}
 
             {overlays.map((layer) => (
-              <div key={layer.id} className="tl-track-row">
-                <button
-                  type="button"
-                  className={`tl-clip overlay ${selectedOverlayId === layer.id ? 'selected' : ''}`}
-                  style={{
-                    left: `${(layer.start / duration) * 100}%`,
-                    width: `${(layer.duration / duration) * 100}%`
-                  }}
-                  title={layer.text || layer.name}
-                  onClick={() => onSelectOverlay?.(layer.id)}
-                >
-                  <span className="tl-clip-label">{layer.name || layer.text}</span>
-                </button>
-              </div>
+              isOverlayVisible && !isOverlayVisible(layer.id) ? null : (
+                <div key={layer.id} className="tl-track-row">
+                  <button
+                    type="button"
+                    className={`tl-clip overlay ${selectedOverlayId === layer.id ? 'selected' : ''}`}
+                    style={{
+                      left: `${(layer.start / duration) * 100}%`,
+                      width: `${(layer.duration / duration) * 100}%`
+                    }}
+                    title={layer.text || layer.name}
+                    onClick={() => onSelectOverlay?.(layer.id)}
+                  >
+                    <span className="tl-clip-label">{layer.name || layer.text}</span>
+                  </button>
+                </div>
+              )
             ))}
           </div>
         </div>
