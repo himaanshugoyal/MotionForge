@@ -130,6 +130,7 @@ export default function TimelinePanel({
   onMoveVideoClip,
   onSplitVideoClip,
   onAutoTrimSilence,
+  onAutoGenerateCaptions,
   onAutoGenerateGraphics,
   isRippleEnabled,
   onToggleRipple,
@@ -355,6 +356,17 @@ export default function TimelinePanel({
             >
               <Wand2 size={13} />
               Auto-GFX
+            </button>
+            <button
+              type="button"
+              className={`tl-tool-btn auto-trim ${hasVideoSelection ? '' : 'disabled'}`}
+              title="Auto captions with default settings"
+              disabled={!hasVideoSelection}
+              onClick={() => onAutoGenerateCaptions && onAutoGenerateCaptions()}
+              style={{ color: 'hsl(var(--accent-cyan))', borderColor: 'hsl(var(--accent-cyan) / 0.45)' }}
+            >
+              <Wand2 size={13} />
+              Auto Captions
             </button>
           </div>
         </div>

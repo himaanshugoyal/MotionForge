@@ -217,6 +217,43 @@ export async function exportVideo({
               ctx.fillStyle = color;
               ctx.fillText(text, xPos, yPos - paddingY);
             }
+            else if (overlay.animationType === 'karaoke') {
+              const relativeOverlayTime = relativeVideoTime - start;
+              const words = Array.isArray(overlay.captionWords) ? overlay.captionWords : [];
+              const activeWordIdx = words.findIndex(
+                (w) => relativeOverlayTime >= (w.start || 0) && relativeOverlayTime <= (w.end || 0)
+              );
+
+              const lineWords = words.length ? words.map((w) => w.text) : [text];
+              const spacing = Math.max(4, 6 * (height / 1080));
+
+              ctx.font = `700 ${size}px Inter, sans-serif`;
+              ctx.textBaseline = 'middle';
+              const totalTextWidth = lineWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + spacing * Math.max(0, lineWords.length - 1);
+              const paddingX = 22 * (height / 1080);
+              const paddingY = 10 * (height / 1080);
+              const maxBoxWidth = width * 0.86;
+              const boxWidth = Math.min(maxBoxWidth, totalTextWidth + paddingX * 2);
+              const boxHeight = size + paddingY * 2;
+              const boxX = xPos - boxWidth / 2;
+              const boxY = yPos - boxHeight / 2;
+
+              ctx.fillStyle = overlay.backgroundColor || 'rgba(0, 0, 0, 0.72)';
+              ctx.beginPath();
+              ctx.roundRect ? ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 8) : ctx.rect(boxX, boxY, boxWidth, boxHeight);
+              ctx.fill();
+
+              let cursorX = xPos - totalTextWidth / 2;
+              lineWords.forEach((word, idx) => {
+                const wordWidth = ctx.measureText(word).width;
+                const isActive = idx === activeWordIdx;
+                ctx.fillStyle = isActive ? (overlay.accentColor || '#22d3ee') : color;
+                ctx.font = `${isActive ? '800' : '600'} ${size * (isActive ? (overlay.activeScale || 1.08) : 1)}px Inter, sans-serif`;
+                ctx.fillText(word, cursorX, yPos);
+                cursorX += wordWidth + spacing;
+                ctx.font = `700 ${size}px Inter, sans-serif`;
+              });
+            }
             else if (overlay.animationType === 'progress') {
               // Draw a progress bar
               ctx.font = `bold ${size}px Inter, sans-serif`;

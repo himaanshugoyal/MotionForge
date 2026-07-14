@@ -211,6 +211,19 @@ function buildLegacyOverlayTracks(project) {
     }
     offset += scene.duration || 4;
   }
+
+  // Global overlays rendered on top of full composition timeline.
+  for (const layer of project.globalOverlays || []) {
+    const overlay = {
+      ...layer,
+      start: layer.start || 0,
+      animationType: layer.animationType || layer.type,
+      trackIndex: layer.trackIndex || 2
+    };
+    const template = PRESET_TEMPLATES.find((t) => t.animationType === overlay.animationType);
+    if (template) chunks.push(template.hyperframeCode(overlay));
+  }
+
   return chunks.join('\n');
 }
 

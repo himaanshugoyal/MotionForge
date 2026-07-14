@@ -82,3 +82,12 @@ export async function ingestUpload(file, { typeHint = 'image', title, notes } = 
   });
   return parseJson(res);
 }
+
+export async function transcribeAudio({ audioBase64, audioMimeType = 'audio/wav', language = '', prompt = '', apiKey = '' }) {
+  const res = await fetch('/api/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audioBase64, audioMimeType, language, prompt, apiKey })
+  });
+  return parseJson(res);
+}

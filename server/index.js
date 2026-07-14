@@ -147,6 +147,65 @@ app.post('/api/ingest/upload', upload.single('file'), async (req, res) => {
   }
 });
 
+/**
+ * Transcribe audio (word timestamps) using OpenAI Whisper.
+ * Body: { audioBase64, audioMimeType?, language?, prompt?, apiKey? }
+ */
+app.post('/api/transcribe', async (req, res) => {
+  try {
+    const { audioBase64, audioMimeType = 'audio/wav', language, prompt, apiKey } = req.body || {};
+    if (!audioBase64 || typeof audioBase64 !== 'string') {
+      return res.status(400).json({ error: 'audioBase64 is required' });
+    }
+
+    const resolvedKey = apiKey || process.env.OPENAI_API_KEY;
+    if (!resolvedKey) {
+      return res.status(400).json({
+        error: 'OpenAI API key missing. Provide apiKey in request or set OPENAI_API_KEY on server.'
+      });
+    }
+
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    const fileBlob = new Blob([audioBuffer], { type: audioMimeType || 'audio/wav' });
+    const form = new FormData();
+    form.append('model', 'whisper-1');
+    form.append('file', fileBlob, `audio.${(audioMimeType || 'audio/wav').split('/')[1] || 'wav'}`);
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
+    form.append('timestamp_granularities[]', 'segment');
+    if (language && typeof language === 'string') {
+      form.append('language', language);
+    }
+    if (prompt && typeof prompt === 'string') {
+      form.append('prompt', prompt);
+    }
+
+    const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resolvedKey}`
+      },
+      body: form
+    });
+
+    const raw = await whisperRes.json().catch(() => ({}));
+    if (!whisperRes.ok) {
+      return res.status(whisperRes.status).json({
+        error: raw?.error?.message || `Transcription failed (${whisperRes.status})`
+      });
+    }
+
+    const words = normalizeWords(raw.words, raw.segments);
+    const segments = normalizeSegments(raw.segments);
+    const text = typeof raw.text === 'string' ? raw.text.trim() : words.map((w) => w.text).join(' ').trim();
+
+    res.json({ text, words, segments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Transcription failed' });
+  }
+});
+
 app.use('/api/assets', express.static(UPLOADS_ROOT));
 app.use('/api/captures', express.static(CAPTURES_ROOT));
 app.use('/api/jobs', express.static(JOBS_ROOT));
@@ -159,3 +218,52 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`MotionForge render API on http://localhost:${PORT}`);
 });
+
+function normalizeWords(rawWords = [], rawSegments = []) {
+  const cleaned = Array.isArray(rawWords)
+    ? rawWords
+        .map((w) => ({
+          text: String(w.word || '').trim(),
+          start: Number(w.start),
+          end: Number(w.end)
+        }))
+        .filter((w) => w.text && Number.isFinite(w.start) && Number.isFinite(w.end) && w.end > w.start)
+    : [];
+
+  if (cleaned.length > 0) {
+    return cleaned;
+  }
+
+  // Fallback: synthesize words from segment timings when word timestamps are absent.
+  const synthesized = [];
+  for (const segment of Array.isArray(rawSegments) ? rawSegments : []) {
+    const segStart = Number(segment.start);
+    const segEnd = Number(segment.end);
+    const segText = String(segment.text || '').trim();
+    if (!segText || !Number.isFinite(segStart) || !Number.isFinite(segEnd) || segEnd <= segStart) continue;
+
+    const parts = segText.split(/\s+/).filter(Boolean);
+    if (!parts.length) continue;
+    const step = (segEnd - segStart) / parts.length;
+    parts.forEach((part, idx) => {
+      synthesized.push({
+        text: part,
+        start: segStart + idx * step,
+        end: segStart + (idx + 1) * step
+      });
+    });
+  }
+
+  return synthesized;
+}
+
+function normalizeSegments(rawSegments = []) {
+  if (!Array.isArray(rawSegments)) return [];
+  return rawSegments
+    .map((s) => ({
+      start: Number(s.start),
+      end: Number(s.end),
+      text: String(s.text || '').trim()
+    }))
+    .filter((s) => s.text && Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start);
+}

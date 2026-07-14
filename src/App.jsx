@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { PRESET_TEMPLATES, CODE_BOILERPLATES } from './constants/presets';
 import { exportVideo } from './utils/exporter';
-import { scrapeWebsite, generateAIComposition, briefFromPdfText, enhanceAIPrompt, analyzeSpeechAndGenerateGraphics } from './utils/aiService';
+import { scrapeWebsite, generateAIComposition, briefFromPdfText, enhanceAIPrompt, analyzeSpeechAndGenerateGraphics, deriveCaptionEffectFromPrompt } from './utils/aiService';
 import { parseCSV, mapCSVToTimeline } from './utils/csvParser';
 import {
   createProject,
@@ -58,7 +58,8 @@ import {
   downloadRender,
   ingestUrl,
   ingestUpload,
-  checkApiHealth
+  checkApiHealth,
+  transcribeAudio
 } from './utils/apiClient';
 import TimelinePanel, { TransportDock, formatTimecode } from './components/TimelinePanel';
 import {
@@ -118,6 +119,37 @@ const DEFAULT_MODELS = {
 
 const AUTO_GFX_GEMINI_MODEL = DEFAULT_MODELS.gemini;
 
+const CAPTION_TEMPLATE_OPTIONS = [
+  {
+    id: 'karaoke-clean',
+    name: 'Karaoke Clean',
+    textColor: '#ffffff',
+    accentColor: '#22d3ee',
+    backgroundColor: 'rgba(0,0,0,0.75)'
+  },
+  {
+    id: 'karaoke-neon',
+    name: 'Karaoke Neon',
+    textColor: '#e2e8f0',
+    accentColor: '#f472b6',
+    backgroundColor: 'rgba(15, 10, 25, 0.72)'
+  },
+  {
+    id: 'karaoke-minimal',
+    name: 'Karaoke Minimal',
+    textColor: '#f8fafc',
+    accentColor: '#facc15',
+    backgroundColor: 'rgba(0,0,0,0.55)'
+  }
+];
+
+const DEFAULT_CAPTION_SETTINGS = {
+  scope: 'selected',
+  templateId: 'karaoke-clean',
+  prompt: 'Energetic karaoke captions with subtle glow and clean readability.',
+  language: ''
+};
+
 function getDefaultModelForProvider(provider) {
   return DEFAULT_MODELS[provider] || MODEL_OPTIONS[provider]?.[0] || '';
 }
@@ -125,6 +157,42 @@ function getDefaultModelForProvider(provider) {
 function getValidModelForProvider(provider, model) {
   const available = MODEL_OPTIONS[provider] || [];
   return available.includes(model) ? model : getDefaultModelForProvider(provider);
+}
+
+function findActiveCaptionWord(words = [], relativeTime = 0) {
+  if (!Array.isArray(words) || !words.length) return -1;
+  return words.findIndex((w) => relativeTime >= (w.start || 0) && relativeTime <= (w.end || 0));
+}
+
+function chunkCaptionWords(words = [], maxWords = 6, maxDuration = 3.2) {
+  if (!Array.isArray(words) || words.length === 0) return [];
+  const chunks = [];
+  let current = [];
+
+  for (const word of words) {
+    const safeWord = {
+      text: String(word.text || '').trim(),
+      start: Number(word.start) || 0,
+      end: Number(word.end) || 0
+    };
+    if (!safeWord.text || safeWord.end <= safeWord.start) continue;
+
+    if (!current.length) {
+      current = [safeWord];
+      continue;
+    }
+
+    const nextDuration = safeWord.end - current[0].start;
+    if (current.length >= maxWords || nextDuration > maxDuration) {
+      chunks.push(current);
+      current = [safeWord];
+    } else {
+      current.push(safeWord);
+    }
+  }
+
+  if (current.length) chunks.push(current);
+  return chunks;
 }
 
 export default function App() {
@@ -202,6 +270,11 @@ export default function App() {
   const [pdfFileName, setPdfFileName] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
+  const [isCaptioning, setIsCaptioning] = useState(false);
+  const [captionScope, setCaptionScope] = useState('selected'); // selected | timeline
+  const [captionTemplateId, setCaptionTemplateId] = useState('karaoke-clean');
+  const [captionPrompt, setCaptionPrompt] = useState('Energetic karaoke captions with subtle glow and clean readability.');
+  const [captionLanguage, setCaptionLanguage] = useState('');
   const [contentBrief, setContentBrief] = useState(null);
   const [screenshotAsset, setScreenshotAsset] = useState(null);
   const [imageBase64, setImageBase64] = useState('');
@@ -850,7 +923,8 @@ export default function App() {
       html = buildCompositionHtml({
         ...project,
         aspectRatio,
-        backgroundVideoUrl: null
+        backgroundVideoUrl: null,
+        globalOverlays: overlays
       }, { baseUrl });
     } else {
       html = buildCompositionHtmlFromOverlays({
@@ -1080,6 +1154,137 @@ export default function App() {
         return moveClip(base, newTimelineStart);
       })
     );
+  };
+
+  const resolveOpenAITranscriptionKey = () => {
+    if (apiProvider === 'openai' && apiKey) return apiKey;
+    return import.meta.env.VITE_OPENAI_API_KEY || localStorage.getItem('mf_key') || '';
+  };
+
+  const getCaptionTargetClips = (scope = captionScope) => {
+    if (scope === 'timeline') {
+      return [...videoClips].sort((a, b) => a.timelineStart - b.timelineStart);
+    }
+
+    if (activeSelectedVideoClips.length > 0) {
+      return [...activeSelectedVideoClips].sort((a, b) => a.timelineStart - b.timelineStart);
+    }
+
+    if (selectedVideoClipId) {
+      const clip = videoClips.find((c) => c.id === selectedVideoClipId);
+      return clip ? [clip] : [];
+    }
+
+    return [];
+  };
+
+  const runAutoCaptions = async (settings = {}) => {
+    const scope = settings.scope || captionScope;
+    const templateId = settings.templateId || captionTemplateId;
+    const prompt = settings.prompt != null ? settings.prompt : captionPrompt;
+    const language = settings.language != null ? settings.language : captionLanguage;
+
+    const targetClips = getCaptionTargetClips(scope).filter((c) => c?.url);
+    if (!targetClips.length) {
+      toast.error(scope === 'timeline' ? 'No clips available in timeline.' : 'Select one or more clips first.');
+      return;
+    }
+
+    commitPendingHistory();
+    setIsCaptioning(true);
+
+    try {
+      const template = CAPTION_TEMPLATE_OPTIONS.find((t) => t.id === templateId) || CAPTION_TEMPLATE_OPTIONS[0];
+      const effect = deriveCaptionEffectFromPrompt(prompt);
+      const transcriptionApiKey = resolveOpenAITranscriptionKey();
+
+      const generatedOverlays = [];
+      let failed = 0;
+
+      for (let i = 0; i < targetClips.length; i += 1) {
+        const clip = targetClips[i];
+        try {
+          toast(`Captions ${i + 1}/${targetClips.length}: extracting audio`, { icon: '🎙️' });
+          const audioBase64 = await extractAudioAsWavBase64(clip.url, clip.sourceIn, clip.sourceOut);
+          if (!audioBase64) {
+            throw new Error('Audio extraction failed.');
+          }
+
+          const transcript = await transcribeAudio({
+            audioBase64,
+            audioMimeType: 'audio/wav',
+            language,
+            prompt,
+            apiKey: transcriptionApiKey
+          });
+
+          const words = Array.isArray(transcript.words) ? transcript.words : [];
+          const chunks = chunkCaptionWords(words, 6, 3.4);
+
+          chunks.forEach((chunk, idx) => {
+            const start = chunk[0].start;
+            const end = chunk[chunk.length - 1].end;
+            const duration = Math.max(0.35, end - start);
+            generatedOverlays.push({
+              id: `caption-${clip.id}-${Date.now()}-${idx}`,
+              name: `Caption ${idx + 1}`,
+              kind: 'caption',
+              text: chunk.map((w) => w.text).join(' '),
+              start: clip.timelineStart + start,
+              duration,
+              fontSize: 36,
+              textColor: template.textColor,
+              accentColor: template.accentColor,
+              backgroundColor: template.backgroundColor,
+              x: 50,
+              y: 86,
+              trackIndex: Math.max(3, overlays.length + idx + 1),
+              animationType: 'karaoke',
+              captionTemplate: template.id,
+              captionWords: chunk.map((w) => ({
+                text: w.text,
+                start: Number((w.start - start).toFixed(3)),
+                end: Number((w.end - start).toFixed(3))
+              })),
+              sourceClipId: clip.id,
+              effectPreset: effect.effectPreset,
+              effectIntensity: effect.intensity,
+              effectPrompt: prompt,
+              activeScale: effect.activeScale,
+              letterSpacing: effect.letterSpacing
+            });
+          });
+        } catch (err) {
+          failed += 1;
+          console.error(err);
+        }
+      }
+
+      if (!generatedOverlays.length) {
+        toast.error('No caption words were generated from the selected audio.');
+        return;
+      }
+
+      setOverlays((prev) => [...prev, ...generatedOverlays]);
+      setSelectedOverlayId(generatedOverlays[0].id);
+      toast.success(`Generated ${generatedOverlays.length} karaoke caption overlays.`);
+      if (failed > 0) {
+        toast.error(`Caption generation skipped ${failed} clip(s) due to errors.`);
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(`Auto captions failed: ${err.message}`);
+    } finally {
+      setIsCaptioning(false);
+    }
+  };
+
+  const handleAutoGenerateCaptions = async () => {
+    await runAutoCaptions();
+  };
+
+  const handleAutoGenerateCaptionsDefault = async () => {
+    await runAutoCaptions(DEFAULT_CAPTION_SETTINGS);
   };
 
   const handleAutoGenerateGraphics = async () => {
@@ -2383,6 +2588,47 @@ export default function App() {
                     Generate Animated Video
                   </button>
                 )}
+
+                <div style={{ borderTop: '1px solid hsl(var(--border-color))', paddingTop: '12px', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <h4 style={{ margin: 0, fontSize: '12px', color: 'hsl(var(--accent-cyan))' }}>Auto Captions (Karaoke)</h4>
+                  <div className="form-group">
+                    <label>Caption Scope</label>
+                    <select value={captionScope} onChange={(e) => setCaptionScope(e.target.value)}>
+                      <option value="selected">Selected clip(s)</option>
+                      <option value="timeline">Entire timeline</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Caption Template</label>
+                    <select value={captionTemplateId} onChange={(e) => setCaptionTemplateId(e.target.value)}>
+                      {CAPTION_TEMPLATE_OPTIONS.map((tpl) => (
+                        <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Caption Effect Prompt</label>
+                    <textarea
+                      rows="2"
+                      value={captionPrompt}
+                      onChange={(e) => setCaptionPrompt(e.target.value)}
+                      placeholder="e.g. energetic neon karaoke with punchy highlights"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Language (optional ISO code)</label>
+                    <input
+                      type="text"
+                      value={captionLanguage}
+                      onChange={(e) => setCaptionLanguage(e.target.value)}
+                      placeholder="en"
+                    />
+                  </div>
+                  <button className="action-btn secondary" onClick={handleAutoGenerateCaptions} disabled={isCaptioning}>
+                    <Sparkles size={14} />
+                    {isCaptioning ? 'Generating captions...' : 'Generate Karaoke Captions'}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -2670,6 +2916,10 @@ export default function App() {
                         if (!isOverlayVisibleInTimeline(overlay.id)) return null;
                         const active = currentTime >= overlay.start && currentTime <= (overlay.start + overlay.duration);
                         if (!active) return null;
+                        const captionRelativeTime = currentTime - overlay.start;
+                        const activeWordIndex = overlay.animationType === 'karaoke'
+                          ? findActiveCaptionWord(overlay.captionWords, captionRelativeTime)
+                          : -1;
 
                         const overlayStyles = {
                           left: `${overlay.x}%`,
@@ -2699,6 +2949,12 @@ export default function App() {
                           overlayStyles['transform'] = 'translateX(-50%)';
                           overlayStyles['width'] = '80%';
                           overlayStyles['textAlign'] = 'center';
+                        } else if (overlay.animationType === 'karaoke') {
+                          overlayStyles['transform'] = 'translateX(-50%)';
+                          overlayStyles['width'] = '86%';
+                          overlayStyles['textAlign'] = 'center';
+                          overlayStyles['lineHeight'] = '1.45';
+                          overlayStyles['letterSpacing'] = `${overlay.letterSpacing || 0}px`;
                         }
 
                         return (
@@ -2711,6 +2967,34 @@ export default function App() {
                             {overlay.animationType === 'fade' ? (
                               <span style={{ backgroundColor: 'rgba(0,0,0,0.75)', padding: '4px 10px', borderRadius: '6px' }}>
                                 {overlay.text}
+                              </span>
+                            ) : overlay.animationType === 'karaoke' ? (
+                              <span style={{
+                                backgroundColor: overlay.backgroundColor || 'rgba(0,0,0,0.72)',
+                                padding: '6px 12px',
+                                borderRadius: '8px',
+                                boxShadow: overlay.effectPreset === 'glow' ? `0 0 20px ${overlay.accentColor}55` : 'none',
+                                display: 'inline-block'
+                              }}>
+                                {(overlay.captionWords || []).map((word, idx) => {
+                                  const isActiveWord = idx === activeWordIndex;
+                                  const scale = isActiveWord ? (overlay.activeScale || 1.08) : 1;
+                                  return (
+                                    <span
+                                      key={`${overlay.id}-w-${idx}`}
+                                      style={{
+                                        color: isActiveWord ? (overlay.accentColor || '#22d3ee') : (overlay.textColor || '#ffffff'),
+                                        fontWeight: isActiveWord ? 800 : 500,
+                                        display: 'inline-block',
+                                        transform: `scale(${scale})`,
+                                        transition: 'all 70ms linear',
+                                        textShadow: isActiveWord && overlay.effectPreset === 'glow' ? `0 0 10px ${overlay.accentColor}` : 'none'
+                                      }}
+                                    >
+                                      {word.text}{idx < (overlay.captionWords || []).length - 1 ? ' ' : ''}
+                                    </span>
+                                  );
+                                })}
                               </span>
                             ) : overlay.animationType === 'progress' ? (
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '220px' }}>
@@ -2782,6 +3066,7 @@ export default function App() {
             onMoveVideoClip={handleMoveVideoClip}
             onSplitVideoClip={handleSplitVideoClip}
             onAutoTrimSilence={handleAutoTrimSilence}
+            onAutoGenerateCaptions={handleAutoGenerateCaptionsDefault}
             onAutoGenerateGraphics={handleAutoGenerateGraphics}
             isRippleEnabled={isRippleEnabled}
             onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
@@ -2950,6 +3235,49 @@ export default function App() {
                         onChange={(e) => handleUpdateOverlay('accentColor', e.target.value)}
                       />
                     </div>
+
+                    {selectedOverlay.animationType === 'karaoke' && (
+                      <>
+                        <div className="form-group">
+                          <label>Caption Template</label>
+                          <select
+                            value={selectedOverlay.captionTemplate || captionTemplateId}
+                            onChange={(e) => {
+                              const template = CAPTION_TEMPLATE_OPTIONS.find((t) => t.id === e.target.value);
+                              handleUpdateOverlay('captionTemplate', e.target.value);
+                              if (template) {
+                                handleUpdateOverlay('textColor', template.textColor);
+                                handleUpdateOverlay('accentColor', template.accentColor);
+                                handleUpdateOverlay('backgroundColor', template.backgroundColor);
+                              }
+                            }}
+                          >
+                            {CAPTION_TEMPLATE_OPTIONS.map((tpl) => (
+                              <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label>Per-caption Effect Prompt</label>
+                          <textarea
+                            rows="2"
+                            value={selectedOverlay.effectPrompt || ''}
+                            onChange={(e) => {
+                              const nextPrompt = e.target.value;
+                              const effect = deriveCaptionEffectFromPrompt(nextPrompt);
+                              handleUpdateOverlay('effectPrompt', nextPrompt);
+                              handleUpdateOverlay('effectPreset', effect.effectPreset);
+                              handleUpdateOverlay('effectIntensity', effect.intensity);
+                              handleUpdateOverlay('activeScale', effect.activeScale);
+                              handleUpdateOverlay('letterSpacing', effect.letterSpacing);
+                            }}
+                          />
+                        </div>
+                        <div style={{ fontSize: '10px', color: 'hsl(var(--text-muted))' }}>
+                          Effect: <strong>{selectedOverlay.effectPreset || 'clean'}</strong>
+                        </div>
+                      </>
+                    )}
 
                     <div className="row-inputs">
                       <div className="form-group">

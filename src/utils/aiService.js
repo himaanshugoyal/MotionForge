@@ -601,3 +601,29 @@ export async function analyzeSpeechAndGenerateGraphics({
     throw new Error('Failed to parse AI response as JSON array');
   }
 }
+
+/**
+ * Map a user prompt to caption effect settings.
+ * Deterministic local parser with safe defaults.
+ */
+export function deriveCaptionEffectFromPrompt(promptText = '') {
+  const text = String(promptText || '').toLowerCase();
+  if (!text.trim()) {
+    return { effectPreset: 'clean', intensity: 0.5, letterSpacing: 0, activeScale: 1.05 };
+  }
+
+  if (/neon|glow|cyber|futur|electric/.test(text)) {
+    return { effectPreset: 'glow', intensity: 0.9, letterSpacing: 0.5, activeScale: 1.1 };
+  }
+  if (/bounce|energetic|hype|punchy|pop/.test(text)) {
+    return { effectPreset: 'bounce', intensity: 0.85, letterSpacing: 0.2, activeScale: 1.16 };
+  }
+  if (/cinematic|dramatic|film|epic/.test(text)) {
+    return { effectPreset: 'cinematic', intensity: 0.75, letterSpacing: 0.8, activeScale: 1.08 };
+  }
+  if (/minimal|clean|simple|subtle/.test(text)) {
+    return { effectPreset: 'clean', intensity: 0.35, letterSpacing: 0, activeScale: 1.03 };
+  }
+
+  return { effectPreset: 'pulse', intensity: 0.6, letterSpacing: 0.2, activeScale: 1.08 };
+}

@@ -445,6 +445,103 @@ export const ProgressBar = () => {
   );
 };`
   }
+  ,
+  {
+    id: 'karaoke-captions',
+    name: 'Karaoke Captions',
+    description: 'Word-by-word highlighted spoken captions',
+    category: 'Captions',
+    defaultText: 'Karaoke captions highlight each spoken word.',
+    defaultDuration: 3,
+    defaultFontSize: 34,
+    defaultTextColor: '#ffffff',
+    defaultAccentColor: '#22d3ee',
+    defaultX: 50,
+    defaultY: 86,
+    animationType: 'karaoke',
+    style: {
+      fontFamily: 'Inter, sans-serif',
+      fontWeight: '700',
+      textAlign: 'center',
+    },
+    hyperframeCode: (cfg) => {
+      const words = Array.isArray(cfg.captionWords) && cfg.captionWords.length
+        ? cfg.captionWords
+        : String(cfg.text || '').split(/\s+/).filter(Boolean).map((w, i, arr) => ({
+            text: w,
+            start: i * (Math.max(0.2, Number(cfg.duration) || 2) / Math.max(1, arr.length)),
+            end: (i + 1) * (Math.max(0.2, Number(cfg.duration) || 2) / Math.max(1, arr.length))
+          }));
+
+      const wordsHtml = words.map((w, idx) => {
+        const delay = Math.max(0, Number(w.start) || 0);
+        const dur = Math.max(0.08, (Number(w.end) || 0) - (Number(w.start) || 0));
+        return `<span class="karaoke-word" style="--kw-delay:${delay.toFixed(3)}s;--kw-dur:${dur.toFixed(3)}s;">${w.text}</span>${idx < words.length - 1 ? ' ' : ''}`;
+      }).join('');
+
+      return `<!-- HyperFrames Karaoke Captions -->
+<div id="karaoke-caption-${cfg.id || 'item'}"
+     class="clip"
+     data-start="${cfg.start.toFixed(1)}"
+     data-duration="${cfg.duration.toFixed(1)}"
+     data-track-index="${cfg.trackIndex}"
+     style="
+       position: absolute;
+       left: ${cfg.x}%;
+       top: ${cfg.y}%;
+       transform: translateX(-50%);
+       width: 86%;
+       text-align: center;
+       font-family: 'Inter', sans-serif;
+       font-size: ${cfg.fontSize}px;
+       color: ${cfg.textColor};
+       line-height: 1.45;
+     ">
+  <span style="background:${cfg.backgroundColor || 'rgba(0,0,0,0.72)'};padding:6px 12px;border-radius:8px;display:inline-block;">
+    ${wordsHtml}
+  </span>
+</div>
+<style>
+  .karaoke-word {
+    color: ${cfg.textColor};
+    animation: karaoke-word-active var(--kw-dur) linear var(--kw-delay) 1;
+  }
+  @keyframes karaoke-word-active {
+    0% { color: ${cfg.textColor}; }
+    35% { color: ${cfg.accentColor}; }
+    100% { color: ${cfg.textColor}; }
+  }
+</style>`;
+    },
+    remotionCode: (cfg) => `import { Sequence, useCurrentFrame, useVideoConfig, AbsoluteFill } from 'remotion';
+
+export const KaraokeCaptions = () => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const words = ${JSON.stringify(Array.isArray(cfg.captionWords) ? cfg.captionWords : [], null, 2)};
+  const startFrame = Math.round(${cfg.start} * fps);
+  const durationInFrames = Math.round(${cfg.duration} * fps);
+  const t = (frame - startFrame) / fps;
+
+  const active = words.findIndex((w) => t >= w.start && t <= w.end);
+
+  return (
+    <Sequence from={startFrame} durationInFrames={durationInFrames}>
+      <AbsoluteFill style={{ pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', left: '${cfg.x}%', top: '${cfg.y}%', transform: 'translateX(-50%)', width: '86%', textAlign: 'center', fontSize: '${cfg.fontSize}px', color: '${cfg.textColor}', fontFamily: 'Inter, sans-serif' }}>
+          <span style={{ background: '${cfg.backgroundColor || 'rgba(0,0,0,0.72)'}', padding: '6px 12px', borderRadius: '8px', display: 'inline-block' }}>
+            {words.map((w, i) => (
+              <span key={i} style={{ color: i === active ? '${cfg.accentColor}' : '${cfg.textColor}', fontWeight: i === active ? 800 : 600 }}>
+                {w.text}{i < words.length - 1 ? ' ' : ''}
+              </span>
+            ))}
+          </span>
+        </div>
+      </AbsoluteFill>
+    </Sequence>
+  );
+};`
+  }
 ];
 
 export const CODE_BOILERPLATES = [
