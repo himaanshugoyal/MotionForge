@@ -79,7 +79,7 @@ import {
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import '@hyperframes/player';
-import { fetchAndDecodePeaks, detectAudioSegments, extractAudioAsWavBase64 } from './utils/audioWaveform';
+import { fetchAndDecodePeaks, detectAudioSegments, extractAudioAsWavBase64, sampleVideoFramesAsBase64 } from './utils/audioWaveform';
 import toast, { Toaster } from 'react-hot-toast';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -193,6 +193,107 @@ function chunkCaptionWords(words = [], maxWords = 6, maxDuration = 3.2) {
 
   if (current.length) chunks.push(current);
   return chunks;
+}
+
+function getAutoGfxLayoutProfile(aspectRatio = 'landscape') {
+  if (aspectRatio === 'portrait') {
+    return {
+      minX: 10,
+      maxX: 90,
+      minY: 12,
+      maxY: 88,
+      defaultY: 78,
+      minFont: 24,
+      maxFont: 56,
+      wrapAt: 32
+    };
+  }
+  if (aspectRatio === 'square') {
+    return {
+      minX: 10,
+      maxX: 90,
+      minY: 10,
+      maxY: 90,
+      defaultY: 80,
+      minFont: 24,
+      maxFont: 60,
+      wrapAt: 40
+    };
+  }
+  return {
+    minX: 8,
+    maxX: 92,
+    minY: 10,
+    maxY: 88,
+    defaultY: 82,
+    minFont: 22,
+    maxFont: 64,
+    wrapAt: 52
+  };
+}
+
+function clamp(num, min, max) {
+  return Math.min(max, Math.max(min, num));
+}
+
+function normalizeAutoGfxText(text, wrapAt = 48) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'Key point';
+  if (clean.length <= wrapAt) return clean;
+  return `${clean.slice(0, Math.max(10, wrapAt - 1)).trim()}…`;
+}
+
+function normalizeAutoGfxOverlays(generated, {
+  aspectRatio = 'landscape',
+  clip,
+  baseTrackIndex = 1
+} = {}) {
+  const profile = getAutoGfxLayoutProfile(aspectRatio);
+  const laneOffsets = [0, -9, 9, -16, 16];
+  const activeLanes = [];
+
+  return (generated || []).map((overlay, idx) => {
+    const start = Math.max(0, Number(overlay.start) || 0);
+    const duration = clamp(Number(overlay.duration) || 2.4, 1.1, 6.5);
+    const text = normalizeAutoGfxText(overlay.text, profile.wrapAt);
+    const textLen = text.length;
+
+    const suggestedFont = Number(overlay.fontSize) || 42;
+    const lenPenalty = textLen > profile.wrapAt ? Math.ceil((textLen - profile.wrapAt) / 8) * 2 : 0;
+    const fontSize = clamp(suggestedFont - lenPenalty, profile.minFont, profile.maxFont);
+
+    let x = clamp(Number(overlay.x) || 50, profile.minX, profile.maxX);
+    let y = clamp(Number(overlay.y) || profile.defaultY, profile.minY, profile.maxY);
+
+    const animationType = ['neon', 'spring', 'cyberpunk', 'fade'].includes(overlay.animationType)
+      ? overlay.animationType
+      : 'fade';
+
+    // Avoid overlapping captions at similar times by lane staggering.
+    while (activeLanes.length && activeLanes[0].end <= start) {
+      activeLanes.shift();
+    }
+    const used = new Set(activeLanes.map((a) => a.lane));
+    const lane = laneOffsets.findIndex((_, laneIdx) => !used.has(laneIdx));
+    const laneIdx = lane >= 0 ? lane : 0;
+    y = clamp(y + laneOffsets[laneIdx], profile.minY, profile.maxY);
+    activeLanes.push({ lane: laneIdx, end: start + duration });
+
+    return {
+      ...overlay,
+      text,
+      start,
+      duration,
+      x,
+      y,
+      fontSize,
+      animationType,
+      trackIndex: baseTrackIndex + idx,
+      sourceClipId: clip?.id || overlay.sourceClipId || null,
+      placementNormalized: true,
+      aspectRatioAtGeneration: aspectRatio
+    };
+  });
 }
 
 export default function App() {
@@ -1321,11 +1422,20 @@ export default function App() {
             throw new Error('Failed to extract audio from the clip.');
           }
 
+          const frameHints = await sampleVideoFramesAsBase64(
+            clip.url,
+            clip.sourceIn,
+            clip.sourceOut,
+            { count: 3, mimeType: 'image/jpeg', quality: 0.72, maxWidth: 640 }
+          );
+
           toast(`Auto-GFX ${i + 1}/${clipsWithAudio.length}: analyzing speech`, { icon: '🧠' });
           const generatedOverlays = await analyzeSpeechAndGenerateGraphics({
             apiKey,
             model: AUTO_GFX_GEMINI_MODEL,
-            audioBase64
+            audioBase64,
+            aspectRatio,
+            frameHints
           });
 
           if (!generatedOverlays || generatedOverlays.length === 0) {
@@ -1338,8 +1448,14 @@ export default function App() {
             start: clip.timelineStart + (o.start || 0)
           }));
 
-          totalGenerated += mappedOverlays.length;
-          accumulatedOverlays.push(...mappedOverlays);
+          const normalizedOverlays = normalizeAutoGfxOverlays(mappedOverlays, {
+            aspectRatio,
+            clip,
+            baseTrackIndex: overlays.length + accumulatedOverlays.length + 1
+          });
+
+          totalGenerated += normalizedOverlays.length;
+          accumulatedOverlays.push(...normalizedOverlays);
         } catch (err) {
           failedClips += 1;
           console.error(err);
@@ -1353,7 +1469,7 @@ export default function App() {
       if (!totalGenerated) {
         toast.error('AI found no suitable moments for graphics in selected clips.');
       } else {
-        toast.success(`Generated ${totalGenerated} synced graphics from ${clipsWithAudio.length} selected clip(s).`);
+        toast.success(`Generated ${totalGenerated} synced graphics from ${clipsWithAudio.length} selected clip(s), aspect-aware and clamped to safe frame bounds.`);
       }
 
       if (failedClips > 0) {

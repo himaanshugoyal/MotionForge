@@ -231,3 +231,113 @@ function writeString(view, offset, string) {
     view.setUint8(offset + i, string.charCodeAt(i));
   }
 }
+
+/**
+ * Sample still frames from a trimmed video range and return base64 image payloads.
+ * Useful for frame-aware AI layout decisions.
+ */
+export async function sampleVideoFramesAsBase64(
+  url,
+  startSec,
+  endSec,
+  { count = 3, mimeType = 'image/jpeg', quality = 0.72, maxWidth = 640 } = {}
+) {
+  if (!url) return [];
+
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = 'anonymous';
+  video.src = url;
+
+  try {
+    await waitForMediaEvent(video, 'loadedmetadata', 8000);
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      return [];
+    }
+
+    const safeStart = Math.max(0, Number(startSec) || 0);
+    const safeEnd = Math.min(video.duration, Number(endSec) || video.duration);
+    if (safeEnd <= safeStart) return [];
+
+    const frameTimes = buildSampleTimes(safeStart, safeEnd, Math.max(1, count));
+    const width = Math.max(2, Math.min(maxWidth, video.videoWidth || maxWidth));
+    const height = Math.max(2, Math.round((video.videoHeight || 360) * (width / Math.max(1, video.videoWidth || width))));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: false });
+    if (!ctx) return [];
+
+    const frames = [];
+    for (const t of frameTimes) {
+      try {
+        video.currentTime = Math.min(safeEnd - 0.02, Math.max(safeStart, t));
+        await waitForMediaEvent(video, 'seeked', 2500);
+        ctx.drawImage(video, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL(mimeType, quality);
+        const base64 = String(dataUrl).split(',')[1] || '';
+        if (base64) {
+          frames.push({
+            time: Number((video.currentTime - safeStart).toFixed(3)),
+            mimeType,
+            data: base64
+          });
+        }
+      } catch {
+        // Continue with remaining timestamps.
+      }
+    }
+
+    return frames;
+  } catch (err) {
+    console.warn('Frame sampling failed:', err);
+    return [];
+  }
+}
+
+function buildSampleTimes(startSec, endSec, count) {
+  if (count <= 1) return [startSec];
+  const span = endSec - startSec;
+  const times = [];
+  for (let i = 0; i < count; i++) {
+    const pct = i / (count - 1);
+    times.push(startSec + span * pct);
+  }
+  return times;
+}
+
+function waitForMediaEvent(el, eventName, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onSuccess = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`Media error while waiting for ${eventName}`));
+    };
+    const onTimeout = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`Timed out waiting for ${eventName}`));
+    };
+    const cleanup = () => {
+      el.removeEventListener(eventName, onSuccess);
+      el.removeEventListener('error', onError);
+      clearTimeout(timer);
+    };
+
+    const timer = setTimeout(onTimeout, timeoutMs);
+    el.addEventListener(eventName, onSuccess, { once: true });
+    el.addEventListener('error', onError, { once: true });
+  });
+}

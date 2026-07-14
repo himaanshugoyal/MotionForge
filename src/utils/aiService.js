@@ -556,11 +556,33 @@ JSON schema:
 Allowed animationTypes: "neon", "spring", "cyberpunk", "fade".
 Keep text concise. Ensure \`start\` and \`duration\` match the audio exactly.`;
 
+function buildSpeechGfxPrompt({ aspectRatio = 'landscape' } = {}) {
+  const safeBounds =
+    aspectRatio === 'portrait'
+      ? 'x must be between 10 and 90, y must be between 12 and 88, avoid placing large text near extreme left/right edges.'
+      : aspectRatio === 'square'
+        ? 'x must be between 10 and 90, y must be between 10 and 90.'
+        : 'x must be between 8 and 92, y must be between 10 and 88.';
+
+  return `${SPEECH_GFX_SYSTEM_PROMPT}
+
+LAYOUT CONTEXT:
+- Composition aspect ratio: ${aspectRatio}
+- ${safeBounds}
+- Keep all overlays fully on-screen and readable.
+- Prefer lower-third or center-safe placements where readability is highest.
+- Avoid placements that would clip off-screen.
+- For long text, lower fontSize and keep text concise.
+- Return only JSON.`;
+}
+
 export async function analyzeSpeechAndGenerateGraphics({
   apiKey,
   model,
   audioBase64,
-  audioMimeType = 'audio/wav'
+  audioMimeType = 'audio/wav',
+  aspectRatio = 'landscape',
+  frameHints = []
 }) {
   const safeModel = requireModel('Gemini Auto-GFX', model);
   if (!safeModel.toLowerCase().startsWith('gemini')) {
@@ -569,13 +591,23 @@ export async function analyzeSpeechAndGenerateGraphics({
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${apiKey}`;
   
+  const parts = [{ inlineData: { mimeType: audioMimeType, data: audioBase64 } }];
+  frameHints.slice(0, 3).forEach((frame) => {
+    if (frame?.data) {
+      parts.push({
+        inlineData: {
+          mimeType: frame.mimeType || 'image/jpeg',
+          data: frame.data
+        }
+      });
+    }
+  });
+  parts.push({ text: buildSpeechGfxPrompt({ aspectRatio }) });
+
   const payload = {
     contents: [{
       role: 'user',
-      parts: [
-        { inlineData: { mimeType: audioMimeType, data: audioBase64 } },
-        { text: SPEECH_GFX_SYSTEM_PROMPT }
-      ]
+      parts
     }],
     generationConfig: { responseMimeType: 'application/json' }
   };
