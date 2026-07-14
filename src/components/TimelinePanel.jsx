@@ -132,6 +132,8 @@ export default function TimelinePanel({
   onAutoTrimSilence,
   onAutoGenerateCaptions,
   onAutoGenerateGraphics,
+  autoGfxPlacementMode = 'speaker-side',
+  onToggleAutoGfxPlacementMode,
   isRippleEnabled,
   onToggleRipple,
   isVideoTrackVisible = true,
@@ -356,6 +358,14 @@ export default function TimelinePanel({
             >
               <Wand2 size={13} />
               Auto-GFX
+            </button>
+            <button
+              type="button"
+              className="tl-tool-btn"
+              title="Toggle Auto-GFX placement mode"
+              onClick={() => onToggleAutoGfxPlacementMode && onToggleAutoGfxPlacementMode()}
+            >
+              {autoGfxPlacementMode === 'speaker-side' ? 'Speaker-Side' : 'Full-Frame'}
             </button>
             <button
               type="button"

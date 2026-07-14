@@ -246,6 +246,7 @@ function normalizeAutoGfxText(text, wrapAt = 48) {
 function normalizeAutoGfxOverlays(generated, {
   aspectRatio = 'landscape',
   clip,
+  placementMode = 'speaker-side',
   baseTrackIndex = 1
 } = {}) {
   const profile = getAutoGfxLayoutProfile(aspectRatio);
@@ -264,6 +265,23 @@ function normalizeAutoGfxOverlays(generated, {
 
     let x = clamp(Number(overlay.x) || 50, profile.minX, profile.maxX);
     let y = clamp(Number(overlay.y) || profile.defaultY, profile.minY, profile.maxY);
+
+    // Speaker-side mode keeps content away from center subject area.
+    if (placementMode === 'speaker-side') {
+      const sideBands = aspectRatio === 'portrait'
+        ? { left: [8, 28], right: [72, 92], center: [36, 64] }
+        : { left: [10, 32], right: [68, 90], center: [36, 64] };
+
+      const isCenter = x >= sideBands.center[0] && x <= sideBands.center[1];
+      if (isCenter) {
+        x = x < 50 ? sideBands.left[1] : sideBands.right[0];
+      }
+      if (x < 50) {
+        x = clamp(x, sideBands.left[0], sideBands.left[1]);
+      } else {
+        x = clamp(x, sideBands.right[0], sideBands.right[1]);
+      }
+    }
 
     const animationType = ['neon', 'spring', 'cyberpunk', 'fade'].includes(overlay.animationType)
       ? overlay.animationType
@@ -291,7 +309,8 @@ function normalizeAutoGfxOverlays(generated, {
       trackIndex: baseTrackIndex + idx,
       sourceClipId: clip?.id || overlay.sourceClipId || null,
       placementNormalized: true,
-      aspectRatioAtGeneration: aspectRatio
+      aspectRatioAtGeneration: aspectRatio,
+      autoGfxPlacementMode: placementMode
     };
   });
 }
@@ -354,6 +373,7 @@ export default function App() {
   });
   const [apiModel, setApiModel] = useState(() => getDefaultModelForProvider('gemini'));
   const [showConfig, setShowConfig] = useState(false);
+  const [autoGfxPlacementMode, setAutoGfxPlacementMode] = useState('speaker-side'); // speaker-side | full-frame
   const [timelineVisibility, setTimelineVisibility] = useState({
     videoTrack: true,
     scenesTrack: true,
@@ -1435,6 +1455,7 @@ export default function App() {
             model: AUTO_GFX_GEMINI_MODEL,
             audioBase64,
             aspectRatio,
+            placementMode: autoGfxPlacementMode,
             frameHints
           });
 
@@ -1451,6 +1472,7 @@ export default function App() {
           const normalizedOverlays = normalizeAutoGfxOverlays(mappedOverlays, {
             aspectRatio,
             clip,
+            placementMode: autoGfxPlacementMode,
             baseTrackIndex: overlays.length + accumulatedOverlays.length + 1
           });
 
@@ -1469,7 +1491,7 @@ export default function App() {
       if (!totalGenerated) {
         toast.error('AI found no suitable moments for graphics in selected clips.');
       } else {
-        toast.success(`Generated ${totalGenerated} synced graphics from ${clipsWithAudio.length} selected clip(s), aspect-aware and clamped to safe frame bounds.`);
+        toast.success(`Generated ${totalGenerated} synced graphics from ${clipsWithAudio.length} selected clip(s), mode: ${autoGfxPlacementMode}.`);
       }
 
       if (failedClips > 0) {
@@ -1487,6 +1509,10 @@ export default function App() {
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const handleToggleAutoGfxPlacementMode = () => {
+    setAutoGfxPlacementMode((prev) => (prev === 'speaker-side' ? 'full-frame' : 'speaker-side'));
   };
 
   const handleAutoTrimSilence = async () => {
@@ -3184,6 +3210,8 @@ export default function App() {
             onAutoTrimSilence={handleAutoTrimSilence}
             onAutoGenerateCaptions={handleAutoGenerateCaptionsDefault}
             onAutoGenerateGraphics={handleAutoGenerateGraphics}
+            autoGfxPlacementMode={autoGfxPlacementMode}
+            onToggleAutoGfxPlacementMode={handleToggleAutoGfxPlacementMode}
             isRippleEnabled={isRippleEnabled}
             onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
             isVideoTrackVisible={timelineVisibility.videoTrack}

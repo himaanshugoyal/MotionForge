@@ -556,7 +556,7 @@ JSON schema:
 Allowed animationTypes: "neon", "spring", "cyberpunk", "fade".
 Keep text concise. Ensure \`start\` and \`duration\` match the audio exactly.`;
 
-function buildSpeechGfxPrompt({ aspectRatio = 'landscape' } = {}) {
+function buildSpeechGfxPrompt({ aspectRatio = 'landscape', placementMode = 'speaker-side' } = {}) {
   const safeBounds =
     aspectRatio === 'portrait'
       ? 'x must be between 10 and 90, y must be between 12 and 88, avoid placing large text near extreme left/right edges.'
@@ -568,9 +568,11 @@ function buildSpeechGfxPrompt({ aspectRatio = 'landscape' } = {}) {
 
 LAYOUT CONTEXT:
 - Composition aspect ratio: ${aspectRatio}
+- Placement mode: ${placementMode}
 - ${safeBounds}
 - Keep all overlays fully on-screen and readable.
-- Prefer lower-third or center-safe placements where readability is highest.
+- In speaker-side mode: prefer left or right side bands and avoid center subject area.
+- In full-frame mode: center placements are allowed when visually better.
 - Avoid placements that would clip off-screen.
 - For long text, lower fontSize and keep text concise.
 - Return only JSON.`;
@@ -582,6 +584,7 @@ export async function analyzeSpeechAndGenerateGraphics({
   audioBase64,
   audioMimeType = 'audio/wav',
   aspectRatio = 'landscape',
+  placementMode = 'speaker-side',
   frameHints = []
 }) {
   const safeModel = requireModel('Gemini Auto-GFX', model);
@@ -602,7 +605,7 @@ export async function analyzeSpeechAndGenerateGraphics({
       });
     }
   });
-  parts.push({ text: buildSpeechGfxPrompt({ aspectRatio }) });
+  parts.push({ text: buildSpeechGfxPrompt({ aspectRatio, placementMode }) });
 
   const payload = {
     contents: [{
