@@ -105,10 +105,27 @@ const SAMPLE_VIDEOS = [
 ];
 
 const MODEL_OPTIONS = {
-  gemini: ['gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-pro-latest', 'gemini-1.5-pro'],
-  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
+  gemini: ['gemini-2.5-flash', 'gemini-2.0-flash'],
+  openai: ['gpt-5', 'gpt-5-mini', 'gpt-4.1'],
   claude: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229']
 };
+
+const DEFAULT_MODELS = {
+  gemini: 'gemini-2.5-flash',
+  openai: 'gpt-5',
+  claude: 'claude-3-5-sonnet-20241022'
+};
+
+const AUTO_GFX_GEMINI_MODEL = DEFAULT_MODELS.gemini;
+
+function getDefaultModelForProvider(provider) {
+  return DEFAULT_MODELS[provider] || MODEL_OPTIONS[provider]?.[0] || '';
+}
+
+function getValidModelForProvider(provider, model) {
+  const available = MODEL_OPTIONS[provider] || [];
+  return available.includes(model) ? model : getDefaultModelForProvider(provider);
+}
 
 export default function App() {
   // Video and Playback State
@@ -166,7 +183,7 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => {
     return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('mf_key') || '';
   });
-  const [apiModel, setApiModel] = useState('gemini-1.5-flash-latest');
+  const [apiModel, setApiModel] = useState(() => getDefaultModelForProvider('gemini'));
   const [showConfig, setShowConfig] = useState(false);
 
   // AI Generation Inputs
@@ -401,9 +418,21 @@ export default function App() {
     0.1
   );
 
+  const handleProviderChange = (nextProvider) => {
+    setApiProvider(nextProvider);
+    setApiModel(getDefaultModelForProvider(nextProvider));
+  };
+
+  const resolveApiModel = () => {
+    const validModel = getValidModelForProvider(apiProvider, apiModel);
+    if (validModel !== apiModel) {
+      setApiModel(validModel);
+    }
+    return validModel;
+  };
+
   // Sync API model dropdown and API key when provider changes
   useEffect(() => {
-    setApiModel(MODEL_OPTIONS[apiProvider][0]);
     const envKey = 
       apiProvider === 'gemini' ? import.meta.env.VITE_GEMINI_API_KEY :
       apiProvider === 'openai' ? import.meta.env.VITE_OPENAI_API_KEY :
@@ -420,10 +449,13 @@ export default function App() {
     const savedProvider = localStorage.getItem('mf_provider');
     const savedKey = localStorage.getItem('mf_key');
     const savedModel = localStorage.getItem('mf_model');
-    if (savedProvider) setApiProvider(savedProvider);
-    if (savedModel) setApiModel(savedModel);
 
-    const provider = savedProvider || 'gemini';
+    const provider = MODEL_OPTIONS[savedProvider] ? savedProvider : 'gemini';
+    const model = getValidModelForProvider(provider, savedModel);
+
+    setApiProvider(provider);
+    setApiModel(model);
+
     const envKey = 
       provider === 'gemini' ? import.meta.env.VITE_GEMINI_API_KEY :
       provider === 'openai' ? import.meta.env.VITE_OPENAI_API_KEY :
@@ -505,9 +537,19 @@ export default function App() {
 
   // Save API config helper
   const handleSaveAPIConfig = () => {
-    localStorage.setItem('mf_provider', apiProvider);
+    const normalizedProvider = MODEL_OPTIONS[apiProvider] ? apiProvider : 'gemini';
+    const normalizedModel = getValidModelForProvider(normalizedProvider, apiModel);
+
+    if (normalizedProvider !== apiProvider) {
+      setApiProvider(normalizedProvider);
+    }
+    if (normalizedModel !== apiModel) {
+      setApiModel(normalizedModel);
+    }
+
+    localStorage.setItem('mf_provider', normalizedProvider);
     localStorage.setItem('mf_key', apiKey);
-    localStorage.setItem('mf_model', apiModel);
+    localStorage.setItem('mf_model', normalizedModel);
     setShowConfig(false);
     toast.success('API key stored securely in your browser!');
   };
@@ -1006,7 +1048,7 @@ export default function App() {
       toast('Analyzing speech...', { icon: '🧠' });
       const generatedOverlays = await analyzeSpeechAndGenerateGraphics({
         apiKey,
-        model: apiModel,
+        model: AUTO_GFX_GEMINI_MODEL,
         audioBase64
       });
 
@@ -1027,7 +1069,12 @@ export default function App() {
       
     } catch (err) {
       console.error(err);
-      toast.error(`Auto-GFX failed: ${err.message}`);
+      const errorMessage = err?.message || 'Unknown error';
+      if (/not found|not supported|unsupported/i.test(errorMessage)) {
+        toast.error(`Auto-GFX failed: selected Gemini model is unavailable. Forced model: ${AUTO_GFX_GEMINI_MODEL}.`);
+      } else {
+        toast.error(`Auto-GFX failed: ${errorMessage}`);
+      }
     } finally {
       setAiLoading(false);
     }
@@ -1440,9 +1487,10 @@ export default function App() {
     }
     setIsEnhancingPrompt(true);
     try {
+      const model = resolveApiModel();
       const enhanced = await enhanceAIPrompt({
         provider: apiProvider,
-        model: apiModel,
+        model,
         apiKey,
         promptText: aiPrompt,
         pdfText,
@@ -1481,12 +1529,13 @@ export default function App() {
 
     setAiLoading(true);
     try {
+      const model = resolveApiModel();
       const combinedPageText = scrapedDataText || rawHtmlPaste;
       const brief = contentBrief || (pdfText ? briefFromPdfText(pdfText, pdfFileName) : null);
 
       const composition = await generateAIComposition({
         provider: apiProvider,
-        model: apiModel,
+        model,
         apiKey: apiKey,
         promptText: aiPrompt,
         fileBase64: pdfBase64,
@@ -1869,7 +1918,7 @@ export default function App() {
 
             <div className="form-group">
               <label>AI Provider</label>
-              <select value={apiProvider} onChange={(e) => setApiProvider(e.target.value)}>
+              <select value={apiProvider} onChange={(e) => handleProviderChange(e.target.value)}>
                 <option value="gemini">Google Gemini</option>
                 <option value="openai">OpenAI (ChatGPT)</option>
                 <option value="claude">Anthropic Claude</option>

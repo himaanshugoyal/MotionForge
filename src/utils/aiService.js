@@ -143,6 +143,14 @@ Rules:
 7. videoDuration is implied by sum of scene durations; also set "videoDuration" to that sum.
 8. Use brand colors from the content brief when provided.`;
 
+function requireModel(provider, model) {
+  const normalized = String(model || '').trim();
+  if (!normalized) {
+    throw new Error(`No model selected for ${provider}. Open API Configuration and choose a model.`);
+  }
+  return normalized;
+}
+
 /**
  * Generate a multi-scene HyperFrames project (+ legacy overlays for canvas editing).
  */
@@ -171,7 +179,8 @@ ${fileBase64 && provider === 'gemini' ? `\n\n[PDF Source Document attached as bi
 ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as binary — use for ken-burns scenes]` : ''}`;
 
   if (provider === 'gemini') {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const safeModel = requireModel('Gemini', model);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${apiKey}`;
     const parts = [{ text: `${SCENE_SYSTEM_PROMPT}\n\n${userQuery}` }];
 
     if (fileBase64) {
@@ -207,9 +216,10 @@ ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as bina
   }
 
   if (provider === 'openai') {
+    const safeModel = requireModel('OpenAI', model);
     const url = 'https://api.openai.com/v1/chat/completions';
     const payload = {
-      model,
+      model: safeModel,
       messages: [
         { role: 'system', content: SCENE_SYSTEM_PROMPT },
         { role: 'user', content: userQuery }
@@ -236,9 +246,10 @@ ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as bina
   }
 
   if (provider === 'claude') {
+    const safeModel = requireModel('Claude', model);
     const baseUrl = proxyUrl || 'https://api.anthropic.com/v1/messages';
     const payload = {
-      model,
+      model: safeModel,
       max_tokens: 5000,
       system: SCENE_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userQuery }]
@@ -306,7 +317,8 @@ ${imageBase64 && provider === 'gemini' ? `\n\n[Screenshot/image attached as bina
 Rewrite or auto-suggest a professional motion graphics video prompt based on this.`;
 
   if (provider === 'gemini') {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const safeModel = requireModel('Gemini', model);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${apiKey}`;
     const parts = [{ text: `${ENHANCE_PROMPT_SYSTEM}\n\n${userQuery}` }];
 
     if (fileBase64) {
@@ -336,9 +348,10 @@ Rewrite or auto-suggest a professional motion graphics video prompt based on thi
   }
 
   if (provider === 'openai') {
+    const safeModel = requireModel('OpenAI', model);
     const url = 'https://api.openai.com/v1/chat/completions';
     const payload = {
-      model,
+      model: safeModel,
       messages: [
         { role: 'system', content: ENHANCE_PROMPT_SYSTEM },
         { role: 'user', content: userQuery }
@@ -364,9 +377,10 @@ Rewrite or auto-suggest a professional motion graphics video prompt based on thi
   }
 
   if (provider === 'claude') {
+    const safeModel = requireModel('Claude', model);
     const baseUrl = proxyUrl || 'https://api.anthropic.com/v1/messages';
     const payload = {
-      model,
+      model: safeModel,
       max_tokens: 2000,
       system: ENHANCE_PROMPT_SYSTEM,
       messages: [{ role: 'user', content: userQuery }]
@@ -548,7 +562,12 @@ export async function analyzeSpeechAndGenerateGraphics({
   audioBase64,
   audioMimeType = 'audio/wav'
 }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const safeModel = requireModel('Gemini Auto-GFX', model);
+  if (!safeModel.toLowerCase().startsWith('gemini')) {
+    throw new Error('Auto-GFX requires a Gemini model id.');
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${apiKey}`;
   
   const payload = {
     contents: [{
