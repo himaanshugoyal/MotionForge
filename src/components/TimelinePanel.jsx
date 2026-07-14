@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2, Link, Eye, EyeOff } from 'lucide-react';
+import { Layers, SkipBack, Play, Pause, RotateCcw, Scissors, Video, Magnet, Wand2, Link, Eye, EyeOff, Plus } from 'lucide-react';
 import { getProjectDuration } from '../models/project';
 import { findActiveClip, getClipsEnd, VIDEO_DRAG_MIME } from '../models/videoClip';
 
@@ -134,6 +134,10 @@ export default function TimelinePanel({
   onAutoGenerateGraphics,
   autoGfxPlacementMode = 'speaker-side',
   onToggleAutoGfxPlacementMode,
+  generatedLanes = [],
+  activeGeneratedLaneId = 'gfx-1',
+  onSetActiveGeneratedLane,
+  onCreateGeneratedLane,
   isRippleEnabled,
   onToggleRipple,
   isVideoTrackVisible = true,
@@ -182,6 +186,60 @@ export default function TimelinePanel({
       return block;
     });
   }, [project?.scenes]);
+
+  const overlayRows = useMemo(() => {
+    const rows = [];
+    const generatedMap = new Map();
+
+    overlays.forEach((overlay, idx) => {
+      const laneId = overlay.laneId;
+      const isGeneratedLane = laneId && String(overlay.laneKind || '').startsWith('generated-');
+      if (isGeneratedLane) {
+        if (!generatedMap.has(laneId)) {
+          generatedMap.set(laneId, {
+            id: laneId,
+            label: overlay.laneLabel || laneId.toUpperCase(),
+            overlays: []
+          });
+        }
+        generatedMap.get(laneId).overlays.push(overlay);
+      } else {
+        rows.push({
+          id: `overlay-${overlay.id}`,
+          label: overlay.name || overlay.text || `L${idx + 1}`,
+          overlays: [overlay]
+        });
+      }
+    });
+
+    const laneOrder = generatedLanes.length
+      ? generatedLanes.map((lane) => lane.id)
+      : Array.from(generatedMap.keys());
+
+    laneOrder.forEach((laneId) => {
+      const lane = generatedMap.get(laneId);
+      if (!lane || lane.overlays.length === 0) return;
+      rows.push(lane);
+    });
+
+    Array.from(generatedMap.values())
+      .filter((lane) => !laneOrder.includes(lane.id))
+      .forEach((lane) => rows.push(lane));
+
+    return rows;
+  }, [overlays, generatedLanes]);
+
+  const isRowVisible = (row) => row.overlays.some((o) => !isOverlayVisible || isOverlayVisible(o.id));
+
+  const toggleRowVisibility = (row) => {
+    const hasVisible = row.overlays.some((o) => !isOverlayVisible || isOverlayVisible(o.id));
+    row.overlays.forEach((o) => {
+      const visible = !isOverlayVisible || isOverlayVisible(o.id);
+      if ((hasVisible && visible) || (!hasVisible && !visible)) {
+        onToggleOverlayVisibility?.(o.id);
+      }
+    });
+  };
 
   const parseDropPayload = (e) => {
     const raw =
@@ -359,6 +417,26 @@ export default function TimelinePanel({
               <Wand2 size={13} />
               Auto-GFX
             </button>
+            <select
+              className="timeline-tc-input"
+              value={activeGeneratedLaneId}
+              onChange={(e) => onSetActiveGeneratedLane && onSetActiveGeneratedLane(e.target.value)}
+              title="Active generated lane"
+              style={{ minWidth: '92px' }}
+            >
+              {(generatedLanes.length ? generatedLanes : [{ id: 'gfx-1', label: 'GFX 1' }]).map((lane) => (
+                <option key={lane.id} value={lane.id}>{lane.label}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="tl-tool-btn"
+              title="Create a new generated graphics lane"
+              onClick={() => onCreateGeneratedLane && onCreateGeneratedLane()}
+            >
+              <Plus size={13} />
+              New GFX Line
+            </button>
             <button
               type="button"
               className="tl-tool-btn"
@@ -442,25 +520,25 @@ export default function TimelinePanel({
                 </button>
               </div>
             )}
-            {overlays.map((layer, i) => (
+            {overlayRows.map((row, i) => (
               <div
-                key={layer.id}
-                className={`tl-gutter-label ${selectedOverlayId === layer.id ? 'active' : ''}`}
-                title={layer.text || layer.name || `Track ${i + 1}`}
+                key={row.id}
+                className={`tl-gutter-label ${row.overlays.some((o) => selectedOverlayId === o.id) ? 'active' : ''}`}
+                title={row.label || `Track ${i + 1}`}
               >
-                <span className={`tl-gutter-text ${isOverlayVisible && !isOverlayVisible(layer.id) ? 'hidden' : ''}`}>
-                  {layer.name || layer.text || `L${i + 1}`}
+                <span className={`tl-gutter-text ${!isRowVisible(row) ? 'hidden' : ''}`}>
+                  {row.label || `L${i + 1}`}
                 </span>
                 <button
                   type="button"
                   className="tl-row-visibility-btn"
-                  title={isOverlayVisible && isOverlayVisible(layer.id) ? 'Hide track item' : 'Show track item'}
+                  title={isRowVisible(row) ? 'Hide track item' : 'Show track item'}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onToggleOverlayVisibility?.(layer.id);
+                    toggleRowVisibility(row);
                   }}
                 >
-                  {isOverlayVisible && isOverlayVisible(layer.id) ? <Eye size={11} /> : <EyeOff size={11} />}
+                  {isRowVisible(row) ? <Eye size={11} /> : <EyeOff size={11} />}
                 </button>
               </div>
             ))}
@@ -596,23 +674,26 @@ export default function TimelinePanel({
               </div>
             )}
 
-            {overlays.map((layer) => (
-              isOverlayVisible && !isOverlayVisible(layer.id) ? null : (
-                <div key={layer.id} className="tl-track-row">
-                  <button
-                    type="button"
-                    className={`tl-clip overlay ${selectedOverlayId === layer.id ? 'selected' : ''}`}
-                    style={{
-                      left: `${(layer.start / duration) * 100}%`,
-                      width: `${(layer.duration / duration) * 100}%`
-                    }}
-                    title={layer.text || layer.name}
-                    onClick={() => onSelectOverlay?.(layer.id)}
-                  >
-                    <span className="tl-clip-label">{layer.name || layer.text}</span>
-                  </button>
-                </div>
-              )
+            {overlayRows.map((row) => (
+              <div key={row.id} className="tl-track-row">
+                {row.overlays.map((layer) => (
+                  isOverlayVisible && !isOverlayVisible(layer.id) ? null : (
+                    <button
+                      type="button"
+                      key={layer.id}
+                      className={`tl-clip overlay ${selectedOverlayId === layer.id ? 'selected' : ''}`}
+                      style={{
+                        left: `${(layer.start / duration) * 100}%`,
+                        width: `${(layer.duration / duration) * 100}%`
+                      }}
+                      title={layer.text || layer.name}
+                      onClick={() => onSelectOverlay?.(layer.id)}
+                    >
+                      <span className="tl-clip-label">{layer.name || layer.text}</span>
+                    </button>
+                  )
+                ))}
+              </div>
             ))}
           </div>
         </div>

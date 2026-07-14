@@ -243,11 +243,19 @@ function normalizeAutoGfxText(text, wrapAt = 48) {
   return `${clean.slice(0, Math.max(10, wrapAt - 1)).trim()}…`;
 }
 
+function getOverlayDefaultWidthPercent(animationType) {
+  if (animationType === 'karaoke') return 86;
+  if (animationType === 'fade') return 80;
+  return null;
+}
+
 function normalizeAutoGfxOverlays(generated, {
   aspectRatio = 'landscape',
   clip,
   placementMode = 'speaker-side',
-  baseTrackIndex = 1
+  baseTrackIndex = 1,
+  laneId = 'gfx-1',
+  laneLabel = 'GFX 1'
 } = {}) {
   const profile = getAutoGfxLayoutProfile(aspectRatio);
   const laneOffsets = [0, -9, 9, -16, 16];
@@ -305,8 +313,15 @@ function normalizeAutoGfxOverlays(generated, {
       x,
       y,
       fontSize,
+      widthPercent: overlay.animationType === 'fade'
+        ? clamp(Number(overlay.widthPercent) || getOverlayDefaultWidthPercent('fade'), 26, 96)
+        : (overlay.widthPercent ?? null),
+      scale: clamp(Number(overlay.scale) || 1, 0.6, 2.4),
       animationType,
       trackIndex: baseTrackIndex + idx,
+      laneKind: 'generated-gfx',
+      laneId,
+      laneLabel,
       sourceClipId: clip?.id || overlay.sourceClipId || null,
       placementNormalized: true,
       aspectRatioAtGeneration: aspectRatio,
@@ -374,6 +389,8 @@ export default function App() {
   const [apiModel, setApiModel] = useState(() => getDefaultModelForProvider('gemini'));
   const [showConfig, setShowConfig] = useState(false);
   const [autoGfxPlacementMode, setAutoGfxPlacementMode] = useState('speaker-side'); // speaker-side | full-frame
+  const [generatedLanes, setGeneratedLanes] = useState([{ id: 'gfx-1', label: 'GFX 1' }]);
+  const [activeGeneratedLaneId, setActiveGeneratedLaneId] = useState('gfx-1');
   const [timelineVisibility, setTimelineVisibility] = useState({
     videoTrack: true,
     scenesTrack: true,
@@ -604,6 +621,7 @@ export default function App() {
   const screenshotInputRef = useRef(null);
   const loadingUrlsRef = useRef(new Set());
   const isMountedRef = useRef(true);
+  const generatedLaneCounterRef = useRef(1);
 
   // Selected Overlay / Video clip details
   const selectedOverlay = overlays.find(o => o.id === selectedOverlayId);
@@ -622,6 +640,25 @@ export default function App() {
   );
 
   const isOverlayVisibleInTimeline = (overlayId) => timelineVisibility.overlays[overlayId] !== false;
+
+  const ensureGeneratedLane = (laneId, laneLabel) => {
+    if (!laneId) return;
+    setGeneratedLanes((prev) => {
+      if (prev.some((lane) => lane.id === laneId)) return prev;
+      return [...prev, { id: laneId, label: laneLabel || laneId.toUpperCase() }];
+    });
+  };
+
+  const handleCreateGeneratedLane = () => {
+    generatedLaneCounterRef.current += 1;
+    const next = {
+      id: `gfx-${generatedLaneCounterRef.current}`,
+      label: `GFX ${generatedLaneCounterRef.current}`
+    };
+    setGeneratedLanes((prev) => [...prev, next]);
+    setActiveGeneratedLaneId(next.id);
+    toast.success(`New GFX line ready: ${next.label}`);
+  };
 
   const toggleVideoTrackVisibility = () => {
     setTimelineVisibility((prev) => ({
@@ -646,6 +683,34 @@ export default function App() {
       }
     }));
   };
+
+  useEffect(() => {
+    const laneMap = new Map();
+    overlays.forEach((overlay) => {
+      if (!overlay?.laneId) return;
+      if (!String(overlay.laneKind || '').startsWith('generated-')) return;
+      laneMap.set(overlay.laneId, overlay.laneLabel || overlay.laneId.toUpperCase());
+    });
+    if (!laneMap.size) return;
+
+    const discovered = Array.from(laneMap.entries()).map(([id, label]) => ({ id, label }));
+    setGeneratedLanes((prev) => {
+      const seen = new Set(prev.map((lane) => lane.id));
+      const additions = discovered.filter((lane) => !seen.has(lane.id));
+      return additions.length ? [...prev, ...additions] : prev;
+    });
+
+    let maxLane = generatedLaneCounterRef.current;
+    discovered.forEach((lane) => {
+      const n = Number(String(lane.id).replace('gfx-', ''));
+      if (Number.isFinite(n)) maxLane = Math.max(maxLane, n);
+    });
+    generatedLaneCounterRef.current = maxLane;
+
+    if (!discovered.some((lane) => lane.id === activeGeneratedLaneId)) {
+      setActiveGeneratedLaneId(discovered[0].id);
+    }
+  }, [overlays, activeGeneratedLaneId]);
 
   const handleProviderChange = (nextProvider) => {
     setApiProvider(nextProvider);
@@ -1318,6 +1383,9 @@ export default function App() {
       const template = CAPTION_TEMPLATE_OPTIONS.find((t) => t.id === templateId) || CAPTION_TEMPLATE_OPTIONS[0];
       const effect = deriveCaptionEffectFromPrompt(prompt);
       const transcriptionApiKey = resolveOpenAITranscriptionKey();
+      const activeLane = generatedLanes.find((lane) => lane.id === activeGeneratedLaneId) || generatedLanes[0];
+      const laneId = activeLane?.id || 'gfx-1';
+      const laneLabel = activeLane?.label || 'GFX 1';
 
       const generatedOverlays = [];
       let failed = 0;
@@ -1360,7 +1428,12 @@ export default function App() {
               x: 50,
               y: 86,
               trackIndex: Math.max(3, overlays.length + idx + 1),
+              laneKind: 'generated-caption',
+              laneId,
+              laneLabel,
               animationType: 'karaoke',
+              widthPercent: getOverlayDefaultWidthPercent('karaoke'),
+              scale: 1,
               captionTemplate: template.id,
               captionWords: chunk.map((w) => ({
                 text: w.text,
@@ -1386,6 +1459,7 @@ export default function App() {
         return;
       }
 
+      ensureGeneratedLane(laneId, laneLabel);
       setOverlays((prev) => [...prev, ...generatedOverlays]);
       setSelectedOverlayId(generatedOverlays[0].id);
       toast.success(`Generated ${generatedOverlays.length} karaoke caption overlays.`);
@@ -1432,6 +1506,9 @@ export default function App() {
       let totalGenerated = 0;
       let failedClips = 0;
       const accumulatedOverlays = [];
+      const activeLane = generatedLanes.find((lane) => lane.id === activeGeneratedLaneId) || generatedLanes[0];
+      const laneId = activeLane?.id || 'gfx-1';
+      const laneLabel = activeLane?.label || 'GFX 1';
 
       for (let i = 0; i < clipsWithAudio.length; i += 1) {
         const clip = clipsWithAudio[i];
@@ -1473,7 +1550,9 @@ export default function App() {
             aspectRatio,
             clip,
             placementMode: autoGfxPlacementMode,
-            baseTrackIndex: overlays.length + accumulatedOverlays.length + 1
+            baseTrackIndex: overlays.length + accumulatedOverlays.length + 1,
+            laneId,
+            laneLabel
           });
 
           totalGenerated += normalizedOverlays.length;
@@ -1485,6 +1564,7 @@ export default function App() {
       }
 
       if (accumulatedOverlays.length) {
+        ensureGeneratedLane(laneId, laneLabel);
         setOverlays((prev) => [...prev, ...accumulatedOverlays]);
       }
 
@@ -1806,6 +1886,48 @@ export default function App() {
     
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleOverlayResizeMouseDown = (e, overlayId, mode = 'width') => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedOverlayId(overlayId);
+
+    const container = playerContainerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const startX = e.clientX;
+    const target = overlays.find((o) => o.id === overlayId);
+    if (!target) return;
+
+    const defaultWidth = getOverlayDefaultWidthPercent(target.animationType) || 80;
+    const baseWidth = Number(target.widthPercent) || defaultWidth;
+    const baseScale = Number(target.scale) || 1;
+
+    const onMove = (moveEvent) => {
+      const deltaPct = ((moveEvent.clientX - startX) / rect.width) * 100;
+      setOverlays((prev) => prev.map((o) => {
+        if (o.id !== overlayId) return o;
+        if (mode === 'scale') {
+          return {
+            ...o,
+            scale: clamp(baseScale + deltaPct / 70, 0.5, 2.5)
+          };
+        }
+        return {
+          ...o,
+          widthPercent: clamp(baseWidth + deltaPct, 24, 98)
+        };
+      }));
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   // Scrub bar helper — timeline clock; clip resolver seeks source media
@@ -3062,11 +3184,15 @@ export default function App() {
                         const activeWordIndex = overlay.animationType === 'karaoke'
                           ? findActiveCaptionWord(overlay.captionWords, captionRelativeTime)
                           : -1;
+                        const scaleValue = clamp(Number(overlay.scale) || 1, 0.5, 2.5);
+                        const defaultWidth = getOverlayDefaultWidthPercent(overlay.animationType);
+                        const widthValue = overlay.widthPercent ?? defaultWidth;
+                        let transformBase = 'translate(-50%, -50%)';
 
                         const overlayStyles = {
                           left: `${overlay.x}%`,
                           top: `${overlay.y}%`,
-                          transform: 'translate(-50%, -50%)',
+                          transform: `${transformBase} scale(${scaleValue})`,
                           fontSize: `${overlay.fontSize}px`,
                           color: overlay.textColor,
                           fontFamily: overlay.animationType === 'cyberpunk' ? 'Space Grotesk, monospace' : 'Inter, sans-serif',
@@ -3088,16 +3214,17 @@ export default function App() {
                           overlayStyles['borderRadius'] = '0 4px 4px 0';
                           overlayStyles['textTransform'] = 'uppercase';
                         } else if (overlay.animationType === 'fade') {
-                          overlayStyles['transform'] = 'translateX(-50%)';
-                          overlayStyles['width'] = '80%';
+                          transformBase = 'translateX(-50%)';
+                          overlayStyles['width'] = `${clamp(Number(widthValue) || 80, 24, 98)}%`;
                           overlayStyles['textAlign'] = 'center';
                         } else if (overlay.animationType === 'karaoke') {
-                          overlayStyles['transform'] = 'translateX(-50%)';
-                          overlayStyles['width'] = '86%';
+                          transformBase = 'translateX(-50%)';
+                          overlayStyles['width'] = `${clamp(Number(widthValue) || 86, 24, 98)}%`;
                           overlayStyles['textAlign'] = 'center';
                           overlayStyles['lineHeight'] = '1.45';
                           overlayStyles['letterSpacing'] = `${overlay.letterSpacing || 0}px`;
                         }
+                        overlayStyles.transform = `${transformBase} scale(${scaleValue})`;
 
                         return (
                           <div
@@ -3150,6 +3277,45 @@ export default function App() {
                               </div>
                             ) : (
                               overlay.text
+                            )}
+                            {selectedOverlayId === overlay.id && (
+                              <>
+                                <span
+                                  role="button"
+                                  title="Resize width"
+                                  onMouseDown={(e) => handleOverlayResizeMouseDown(e, overlay.id, 'width')}
+                                  style={{
+                                    position: 'absolute',
+                                    right: '-10px',
+                                    top: '50%',
+                                    width: '12px',
+                                    height: '12px',
+                                    borderRadius: '999px',
+                                    background: 'hsl(var(--accent-cyan))',
+                                    border: '1px solid rgba(255,255,255,0.8)',
+                                    transform: 'translateY(-50%)',
+                                    cursor: 'ew-resize',
+                                    boxShadow: '0 0 0 2px rgba(0,0,0,0.35)'
+                                  }}
+                                />
+                                <span
+                                  role="button"
+                                  title="Scale"
+                                  onMouseDown={(e) => handleOverlayResizeMouseDown(e, overlay.id, 'scale')}
+                                  style={{
+                                    position: 'absolute',
+                                    right: '-10px',
+                                    bottom: '-10px',
+                                    width: '12px',
+                                    height: '12px',
+                                    borderRadius: '2px',
+                                    background: 'hsl(var(--accent-purple))',
+                                    border: '1px solid rgba(255,255,255,0.8)',
+                                    cursor: 'nwse-resize',
+                                    boxShadow: '0 0 0 2px rgba(0,0,0,0.35)'
+                                  }}
+                                />
+                              </>
                             )}
                           </div>
                         );
@@ -3212,6 +3378,10 @@ export default function App() {
             onAutoGenerateGraphics={handleAutoGenerateGraphics}
             autoGfxPlacementMode={autoGfxPlacementMode}
             onToggleAutoGfxPlacementMode={handleToggleAutoGfxPlacementMode}
+            generatedLanes={generatedLanes}
+            activeGeneratedLaneId={activeGeneratedLaneId}
+            onSetActiveGeneratedLane={setActiveGeneratedLaneId}
+            onCreateGeneratedLane={handleCreateGeneratedLane}
             isRippleEnabled={isRippleEnabled}
             onToggleRipple={() => setIsRippleEnabled(!isRippleEnabled)}
             isVideoTrackVisible={timelineVisibility.videoTrack}
@@ -3367,6 +3537,30 @@ export default function App() {
                           type="text" 
                           value={selectedOverlay.textColor} 
                           onChange={(e) => handleUpdateOverlay('textColor', e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="row-inputs">
+                      <div className="form-group">
+                        <label>Width (%)</label>
+                        <input
+                          type="number"
+                          min="24"
+                          max="98"
+                          value={Math.round(Number(selectedOverlay.widthPercent ?? getOverlayDefaultWidthPercent(selectedOverlay.animationType) ?? 80))}
+                          onChange={(e) => handleUpdateOverlay('widthPercent', clamp(parseFloat(e.target.value) || 80, 24, 98))}
+                        />
+                      </div>
+                      <div className="form-group">
+                        <label>Scale</label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0.5"
+                          max="2.5"
+                          value={(Number(selectedOverlay.scale) || 1).toFixed(2)}
+                          onChange={(e) => handleUpdateOverlay('scale', clamp(parseFloat(e.target.value) || 1, 0.5, 2.5))}
                         />
                       </div>
                     </div>

@@ -126,7 +126,8 @@ export async function exportVideo({
 
             const xPos = (overlay.x / 100) * width;
             const yPos = (overlay.y / 100) * height;
-            const size = parseFloat(overlay.fontSize) * (height / 1080); // scale text relative to render size
+            const overlayScale = Math.max(0.5, Math.min(2.5, Number(overlay.scale) || 1));
+            const size = parseFloat(overlay.fontSize) * (height / 1080) * overlayScale; // scale text relative to render size
             const color = overlay.textColor || '#ffffff';
             const accent = overlay.accentColor || '#a855f7';
             const text = overlay.text || '';
@@ -204,14 +205,16 @@ export async function exportVideo({
               
               // Dark background box
               const textWidth = ctx.measureText(text).width;
+              const maxWidth = width * (Math.max(24, Math.min(98, Number(overlay.widthPercent) || 80)) / 100);
               const paddingX = 16 * (height / 1080);
               const paddingY = 6 * (height / 1080);
-              const rx = xPos - textWidth / 2 - paddingX;
+              const boxTextWidth = Math.min(textWidth, maxWidth);
+              const rx = xPos - boxTextWidth / 2 - paddingX;
               const ry = yPos - size - paddingY * 2;
               
               ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
               ctx.beginPath();
-              ctx.roundRect ? ctx.roundRect(rx, ry, textWidth + paddingX * 2, size + paddingY * 2, 6) : ctx.rect(rx, ry, textWidth + paddingX * 2, size + paddingY * 2);
+              ctx.roundRect ? ctx.roundRect(rx, ry, boxTextWidth + paddingX * 2, size + paddingY * 2, 6) : ctx.rect(rx, ry, boxTextWidth + paddingX * 2, size + paddingY * 2);
               ctx.fill();
               
               ctx.fillStyle = color;
@@ -232,7 +235,7 @@ export async function exportVideo({
               const totalTextWidth = lineWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + spacing * Math.max(0, lineWords.length - 1);
               const paddingX = 22 * (height / 1080);
               const paddingY = 10 * (height / 1080);
-              const maxBoxWidth = width * 0.86;
+              const maxBoxWidth = width * (Math.max(24, Math.min(98, Number(overlay.widthPercent) || 86)) / 100);
               const boxWidth = Math.min(maxBoxWidth, totalTextWidth + paddingX * 2);
               const boxHeight = size + paddingY * 2;
               const boxX = xPos - boxWidth / 2;
